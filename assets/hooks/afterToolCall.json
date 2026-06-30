@@ -1,0 +1,14 @@
+[
+  {
+    "matcher": "filesystem-create,filesystem-edit,filesystem-replaceedit",
+    "description": "OMS: Auto-run build/test after file edits in executing/verifying/fixing stages",
+    "hooks": [
+      {
+        "type": "command",
+        "command": "node .snow/oms-state/after-tool-call.mjs",
+        "timeout": 120000,
+        "enabled": true
+      }
+    ]
+  }
+]

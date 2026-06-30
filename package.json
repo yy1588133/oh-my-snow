@@ -1,0 +1,31 @@
+{
+  "name": "oh-my-snow",
+  "version": "0.1.0",
+  "description": "Oh-My-Snow — Autonomous orchestration plugin for Snow CLI",
+  "type": "module",
+  "main": "dist/mcp-server.js",
+  "bin": {
+    "oms": "dist/installer.js"
+  },
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsc --watch",
+    "start": "node dist/mcp-server.js"
+  },
+  "keywords": [
+    "snow-cli",
+    "mcp",
+    "orchestration",
+    "autonomous",
+    "ai",
+    "plugin"
+  ],
+  "license": "MIT",
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.12.1"
+  },
+  "devDependencies": {
+    "typescript": "^5.7.0",
+    "@types/node": "^22.10.0"
+  }
+}

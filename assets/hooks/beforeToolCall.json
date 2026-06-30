@@ -1,0 +1,14 @@
+[
+  {
+    "matcher": "filesystem-create,filesystem-edit,filesystem-replaceedit,terminal-execute",
+    "description": "OMS: Block file edits and terminal commands in non-editing stages",
+    "hooks": [
+      {
+        "type": "command",
+        "command": "node .snow/oms-state/before-tool-call.mjs",
+        "timeout": 5000,
+        "enabled": true
+      }
+    ]
+  }
+]
