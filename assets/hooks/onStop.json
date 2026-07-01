@@ -1,13 +1,13 @@
 [
-  {
-    "description": "OMS: Drive orchestration loop — inject continuation prompt after AI turns",
-    "hooks": [
-      {
-        "type": "command",
-        "command": "node .snow/oms-state/on-stop.mjs",
-        "timeout": 10000,
-        "enabled": true
-      }
-    ]
-  }
+	{
+		"description": "OMS: Drive orchestration loop — inject continuation prompt after AI turns",
+		"hooks": [
+			{
+				"type": "command",
+				"command": "node .snow/oms-state/on-stop.mjs",
+				"timeout": 120000,
+				"enabled": true
+			}
+		]
+	}
 ]

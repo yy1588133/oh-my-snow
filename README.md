@@ -14,7 +14,7 @@ OMS wraps Snow CLI with a state machine, stage enforcement, auto-verification, a
 - 📸 **Snapshots** — Save and restore session state for long-running tasks
 - 🎓 **Learning** — Extract reusable patterns from sessions into SKILL.md files
 - 🤖 **18 specialized sub-agents** — Architecture, security, testing, research, and more
-- 📚 **7 skills** — Deep code analysis, execution tracing, cleanup, visual verification, and more
+- 📚 **10 skills** — Deep code analysis, execution tracing, cleanup, visual verification, and more
 - 🛠️ **9 commands** — Auto, plan, QA, goal, verify, release, save, stop, help
 
 ## Installation
@@ -28,13 +28,15 @@ The `oms setup` command:
 
 1. Registers the MCP server in `~/.snow/settings.json`
 2. Merges 18 sub-agents into `~/.snow/sub-agents.json`
-3. Copies 7 skills to `~/.snow/skills/oms/`
+3. Copies 10 skills to `~/.snow/skills/oms/`
 4. Copies 9 commands to `~/.snow/commands/oms/`
-5. Copies 4 hook scripts to `<project>/.snow/oms-state/`
+5. Copies 4 hook scripts + shared lib to `<project>/.snow/oms-state/`
 6. Merges 4 hook configs into `<project>/.snow/hooks/`
 7. Creates `<project>/.snow/oms-state/` for session state
 
 > **Note**: Run `oms setup` from your project directory so hooks are installed in the correct location.
+
+> **Note**: Hook commands use forward slashes in paths (e.g., `.snow/oms-state/before-tool-call.mjs`), which is supported by Node.js on all platforms including Windows. If you encounter path issues on Windows, please report them.
 
 ## Quick Start
 
@@ -67,7 +69,7 @@ Shell scripts triggered by Snow CLI at specific lifecycle events:
 | Hook             | Trigger                   | Purpose                                                                              |
 | ---------------- | ------------------------- | ------------------------------------------------------------------------------------ |
 | `beforeToolCall` | Before any tool executes  | Blocks file edits in non-editing stages (planning, verifying, done)                  |
-| `afterToolCall`  | After a tool completes    | Auto-runs build/test after file edits in executing/verifying/fixing stages           |
+| `afterToolCall`  | After a tool completes    | Schedules build/test verification after file edits in executing/fixing stages        |
 | `onUserMessage`  | When user sends a message | Injects stage-aware guidance into the conversation                                   |
 | `onStop`         | When AI finishes a turn   | Drives the orchestration loop — injects continuation prompts and detects text bypass |
 
@@ -111,22 +113,25 @@ planning → executing → verifying → done
 | `oms-add-task`      | Add a task during the planning phase                                         |
 | `oms-complete-task` | Mark a task as completed                                                     |
 | `oms-snapshot`      | Save, restore, or list execution snapshots                                   |
-| `oms-learn`         | Extract reusable patterns into a SKILL.md file                               |
+| `oms-learn`         | Extract reusable patterns and orchestrate skill evolution cycle              |
 | `oms-stop`          | End the orchestration session and clean up state                             |
 
 ## Skills
 
 Load a skill with `/skill <name>`:
 
-| Skill       | Description                                                            |
-| ----------- | ---------------------------------------------------------------------- |
-| `interview` | Socratic-style requirement clarification through iterative questioning |
-| `dive`      | Deep code analysis: structure → dependencies → data flow → risks       |
-| `trace`     | Execution tracing: call chain tracing + state change recording         |
-| `cleanup`   | Detect and clean up AI-generated redundant or low-quality code         |
-| `vverify`   | Visual verification: UI screenshot comparison + visual consistency     |
-| `wiki`      | Auto-generate wiki documentation from source code analysis             |
-| `research`  | Autonomous multi-step research combining web search and code analysis  |
+| Skill           | Description                                                                      |
+| --------------- | -------------------------------------------------------------------------------- |
+| `interview`     | Socratic-style requirement clarification through iterative questioning           |
+| `dive`          | Deep code analysis: structure → dependencies → data flow → risks                 |
+| `trace`         | Execution tracing: call chain tracing + state change recording                   |
+| `cleanup`       | Detect and clean up AI-generated redundant or low-quality code                   |
+| `vverify`       | Visual verification: UI screenshot comparison + visual consistency               |
+| `wiki`          | Auto-generate wiki documentation from source code analysis                       |
+| `research`      | Autonomous multi-step research combining web search and code analysis            |
+| `darwin-skill`  | Evaluate skills across 9 dimensions + ratchet mechanism (keep only improvements) |
+| `skill-evolver` | Strategy-diversified exploration — author, deploy, test, refine skills           |
+| `embodi-skill`  | Skill-aware reflection — targeted revision signals from execution trajectories   |
 
 ## Sub-Agents
 
@@ -260,9 +265,11 @@ oh-my-snow/
 │       └── store.ts           # State management (JSON file persistence)
 ├── hooks/
 │   ├── before-tool-call.mjs   # Stage enforcement hook
-│   ├── after-tool-call.mjs    # Auto-verification hook
-│   ├── on-stop.mjs            # Orchestration loop driver
-│   └── on-user-message.mjs    # Stage-aware guidance injector
+│   ├── after-tool-call.mjs    # Auto-verification hook (writes pending-verify marker)
+│   ├── on-stop.mjs            # Orchestration loop driver (runs build/test + injects continuation)
+│   ├── on-user-message.mjs    # Stage-aware guidance injector
+│   └── lib/
+│       └── oms-state.mjs      # Shared utilities (state I/O, lock, verify detection)
 ├── assets/
 │   ├── agents/
 │   │   └── sub-agents.json    # 18 sub-agent definitions
@@ -274,7 +281,10 @@ oh-my-snow/
 │   │       ├── cleanup/SKILL.md
 │   │       ├── vverify/SKILL.md
 │   │       ├── wiki/SKILL.md
-│   │       └── research/SKILL.md
+│   │       ├── research/SKILL.md
+│   │       ├── darwin-skill/SKILL.md
+│   │       ├── skill-evolver/SKILL.md
+│   │       └── embodi-skill/SKILL.md
 │   ├── commands/
 │   │   └── oms/
 │   │       ├── auto.json

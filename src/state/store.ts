@@ -13,14 +13,18 @@ import {
 	mkdirSync,
 	readFileSync,
 	writeFileSync,
-	readdirSync,
+	appendFileSync,
 	unlinkSync,
+	renameSync,
+	openSync,
+	closeSync,
+	statSync,
 } from 'fs';
-import {join, dirname} from 'path';
+import {join} from 'path';
 
 // ── Types ──
 
-export type Stage = 'idle' | 'planning' | 'executing' | 'verifying' | 'fixing' | 'done';
+export type Stage = 'planning' | 'executing' | 'verifying' | 'fixing' | 'done';
 
 export interface Task {
 	id: string;
@@ -54,7 +58,7 @@ export interface OmsState {
 	/** Turn counter — incremented by onStop each AI turn */
 	turnCount: number;
 	/** Timestamps for each stage transition */
-	stageHistory: { stage: Stage; timestamp: string }[];
+	stageHistory: {stage: Stage; timestamp: string}[];
 	/** Verification results log */
 	logs: LogEntry[];
 	/** Snapshots for cross-session state recovery */
@@ -68,7 +72,6 @@ export interface OmsState {
 // ── Constants ──
 
 const VALID_TRANSITIONS: Record<Stage, Stage[]> = {
-	idle: ['planning'],
 	planning: ['executing'],
 	executing: ['verifying', 'planning'],
 	verifying: ['fixing', 'done'],
@@ -101,7 +104,7 @@ function getVerifyCommandFilePath(): string {
 export function ensureStateDir(): void {
 	const dir = getStateDir();
 	if (!existsSync(dir)) {
-		mkdirSync(dir, { recursive: true });
+		mkdirSync(dir, {recursive: true});
 	}
 }
 
@@ -112,9 +115,27 @@ export function loadState(): OmsState | null {
 	}
 	try {
 		const content = readFileSync(filePath, 'utf-8');
-		return JSON.parse(content) as OmsState;
+		const state = JSON.parse(content) as OmsState;
+		// Migrate legacy 'idle' stage (v0.1.0) to 'planning' in-memory (lazy migration).
+		// The migration is persisted by the next saveState call from any mutation.
+		if ((state.stage as string) === 'idle') {
+			state.stage = 'planning';
+		}
+		return state;
 	} catch {
 		return null;
+	}
+}
+
+function syncSleep(ms: number): void {
+	try {
+		Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+	} catch {
+		// Fallback: if Atomics.wait or SharedArrayBuffer is unavailable, use Date.now() spin
+		const start = Date.now();
+		while (Date.now() - start < ms) {
+			// spin
+		}
 	}
 }
 
@@ -127,9 +148,75 @@ export function saveState(state: OmsState): void {
 	const filePath = getStateFilePath();
 	const content = JSON.stringify(state, null, 2);
 
-	// Write directly — on Windows, rename can fail if target exists.
-	// We use writeFileSync which is atomic for small files on most filesystems.
-	writeFileSync(filePath, content, 'utf-8');
+	const lockPath = filePath + '.lock';
+
+	// Stale lock detection: if lock file is older than 120s, force-remove it
+	if (existsSync(lockPath)) {
+		try {
+			const lockStat = statSync(lockPath);
+			const lockAge = Date.now() - lockStat.mtimeMs;
+			if (lockAge > 120000) {
+				unlinkSync(lockPath);
+			}
+		} catch {}
+	}
+
+	let fd: number | undefined;
+	let lockCreated = false;
+
+	// Retry loop: attempt to acquire lock up to 5 times with 50ms busy-wait delays
+	const MAX_RETRIES = 5;
+	const RETRY_DELAY_MS = 50;
+
+	for (let attempt = 0; attempt < MAX_RETRIES; attempt++) {
+		try {
+			fd = openSync(lockPath, 'wx'); // Atomic create, throws if exists
+			lockCreated = true;
+			closeSync(fd);
+			fd = undefined;
+			break; // Lock acquired successfully
+		} catch {
+			if (attempt < MAX_RETRIES - 1) {
+				syncSleep(RETRY_DELAY_MS);
+			}
+		}
+	}
+
+	if (!lockCreated) {
+		// All retries exhausted — skip write to avoid data corruption from concurrent writes
+		try {
+			const logPath = join(getStateDir(), 'errors.log');
+			const timestamp = new Date().toISOString();
+			appendFileSync(
+				logPath,
+				`[${timestamp}] saveState: lock contention after retries, skipping write to avoid data corruption\n`,
+				'utf-8',
+			);
+		} catch {}
+		return; // Skip write — do NOT fall through to the finally block
+	}
+
+	try {
+		const tmpPath = filePath + '.tmp';
+		writeFileSync(tmpPath, content, 'utf-8');
+		try {
+			renameSync(tmpPath, filePath);
+		} catch {
+			// Cross-device fallback: direct write
+			writeFileSync(filePath, content, 'utf-8');
+			try {
+				unlinkSync(tmpPath);
+			} catch {}
+		}
+	} finally {
+		// Only delete the lock if THIS process created it.
+		// Deleting another process's lock breaks the mutual exclusion guarantee.
+		if (lockCreated) {
+			try {
+				unlinkSync(lockPath);
+			} catch {}
+		}
+	}
 }
 
 export function deleteState(): void {
@@ -141,6 +228,26 @@ export function deleteState(): void {
 	const verifyPath = getVerifyCommandFilePath();
 	if (existsSync(verifyPath)) {
 		unlinkSync(verifyPath);
+	}
+	// Clean up pending-verify marker (may be left over from abnormal termination)
+	const markerPath = join(getStateDir(), '.pending-verify');
+	if (existsSync(markerPath)) {
+		try {
+			unlinkSync(markerPath);
+		} catch {}
+	}
+	// Clean up lock and tmp files from saveState
+	const lockPath = filePath + '.lock';
+	if (existsSync(lockPath)) {
+		try {
+			unlinkSync(lockPath);
+		} catch {}
+	}
+	const tmpPath = filePath + '.tmp';
+	if (existsSync(tmpPath)) {
+		try {
+			unlinkSync(tmpPath);
+		} catch {}
 	}
 }
 
@@ -155,7 +262,7 @@ export function createState(goal: string, verifyCommand: string): OmsState {
 		verifyCommand,
 		tasks: [],
 		turnCount: 0,
-		stageHistory: [{ stage: 'planning', timestamp: now }],
+		stageHistory: [{stage: 'planning', timestamp: now}],
 		logs: [],
 		snapshots: [],
 		createdAt: now,
@@ -165,20 +272,21 @@ export function createState(goal: string, verifyCommand: string): OmsState {
 	return state;
 }
 
-export function getStage(state: OmsState): Stage {
-	return state.stage;
-}
-
 export function setStage(state: OmsState, newStage: Stage): OmsState {
 	const current = state.stage;
-	const allowed = VALID_TRANSITIONS[current];
+	const allowed = VALID_TRANSITIONS[current] ?? [];
 	if (!allowed.includes(newStage)) {
 		throw new Error(
-			`Invalid stage transition: ${current} → ${newStage}. Valid transitions from "${current}": [${allowed.join(', ')}]`,
+			`Invalid stage transition: ${current} → ${newStage}. Valid transitions from "${current}": [${allowed.join(
+				', ',
+			)}]`,
 		);
 	}
 	state.stage = newStage;
-	state.stageHistory.push({ stage: newStage, timestamp: new Date().toISOString() });
+	state.stageHistory.push({
+		stage: newStage,
+		timestamp: new Date().toISOString(),
+	});
 	state.updatedAt = new Date().toISOString();
 	saveState(state);
 	return state;
@@ -197,7 +305,7 @@ export function addTask(state: OmsState, description: string): OmsState {
 }
 
 export function completeTask(state: OmsState, taskId: string): OmsState {
-	const task = state.tasks.find((t) => t.id === taskId);
+	const task = state.tasks.find(t => t.id === taskId);
 	if (!task) {
 		throw new Error(`Task not found: ${taskId}`);
 	}
@@ -222,59 +330,32 @@ export function addLog(state: OmsState, message: string): OmsState {
 	return state;
 }
 
-export function incrementTurn(state: OmsState): OmsState {
-	state.turnCount++;
-	state.updatedAt = new Date().toISOString();
-	saveState(state);
-	return state;
-}
-
 // ── Snapshot operations ──
 
-export function saveSnapshot(state: OmsState, key: string, data: unknown): OmsState {
+export function saveSnapshot(
+	state: OmsState,
+	key: string,
+	data: unknown,
+): OmsState {
 	// Remove existing snapshot with same key
-	state.snapshots = state.snapshots.filter((s) => s.key !== key);
-	state.snapshots.push({ key, data, createdAt: new Date().toISOString() });
+	state.snapshots = state.snapshots.filter(s => s.key !== key);
+	state.snapshots.push({key, data, createdAt: new Date().toISOString()});
 	state.updatedAt = new Date().toISOString();
 	saveState(state);
 	return state;
 }
 
 export function loadSnapshot(state: OmsState, key: string): Snapshot | null {
-	return state.snapshots.find((s) => s.key === key) ?? null;
+	return state.snapshots.find(s => s.key === key) ?? null;
 }
 
-export function listSnapshots(state: OmsState): { key: string; createdAt: string }[] {
-	return state.snapshots.map((s) => ({ key: s.key, createdAt: s.createdAt }));
+export function listSnapshots(
+	state: OmsState,
+): {key: string; createdAt: string}[] {
+	return state.snapshots.map(s => ({key: s.key, createdAt: s.createdAt}));
 }
-
-// ── Verify command file ──
 
 export function saveVerifyCommandFile(cmd: string): void {
 	ensureStateDir();
 	writeFileSync(getVerifyCommandFilePath(), cmd, 'utf-8');
-}
-
-export function loadVerifyCommandFile(): string | null {
-	const path = getVerifyCommandFilePath();
-	if (!existsSync(path)) return null;
-	try {
-		return readFileSync(path, 'utf-8').trim();
-	} catch {
-		return null;
-	}
-}
-
-// ── Utility ──
-
-export function getActiveTaskCount(state: OmsState): number {
-	return state.tasks.filter((t) => !t.completed).length;
-}
-
-export function getCompletedTaskCount(state: OmsState): number {
-	return state.tasks.filter((t) => t.completed).length;
-}
-
-export function getStateDirPath(): string {
-	return getStateDir();
 }

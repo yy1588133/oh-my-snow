@@ -1,6 +1,6 @@
 {
   "name": "oms:stop",
-  "command": "node -e \"console.log('Stopping OMS session...')\"",
-  "type": "execute",
-  "description": "Stop the active OMS orchestration session (use oms-stop MCP tool for actual cleanup)"
+  "command": "Call the oms-stop MCP tool immediately to end the current OMS session and clean up state. After calling it, inform the user the session has been stopped.",
+  "type": "prompt",
+  "description": "Stop the active OMS orchestration session"
 }

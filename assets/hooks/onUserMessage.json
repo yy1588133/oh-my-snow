@@ -1,13 +1,13 @@
 [
-  {
-    "description": "OMS: Inject stage-aware orchestration prompt on user messages",
-    "hooks": [
-      {
-        "type": "command",
-        "command": "node .snow/oms-state/on-user-message.mjs",
-        "timeout": 5000,
-        "enabled": true
-      }
-    ]
-  }
+	{
+		"description": "OMS: Inject stage-aware orchestration prompt on user messages",
+		"hooks": [
+			{
+				"type": "command",
+				"command": "node .snow/oms-state/on-user-message.mjs",
+				"timeout": 5000,
+				"enabled": true
+			}
+		]
+	}
 ]

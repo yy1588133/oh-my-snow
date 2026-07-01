@@ -11,7 +11,7 @@
  *   oms-add-task       — Add a task during planning phase
  *   oms-complete-task  — Mark a task as completed
  *   oms-snapshot       — Save / restore / list execution snapshots
- *   oms-learn          — Extract reusable patterns into a SKILL.md
+ *   oms-learn          — Extract reusable patterns + orchestrate skill evolution
  *   oms-stop           — End the orchestration session
  */
 
@@ -25,7 +25,6 @@ import {
 	addTask,
 	completeTask,
 	addLog,
-	incrementTurn,
 	saveSnapshot,
 	loadSnapshot,
 	listSnapshots,
@@ -38,7 +37,7 @@ import {join} from 'path';
 // ── Server setup ──
 
 const server = new McpServer(
-	{name: 'oh-my-snow', version: '0.1.0'},
+	{name: 'oh-my-snow', version: '0.2.0'},
 	{
 		capabilities: {
 			tools: {},
@@ -68,7 +67,11 @@ server.registerTool(
 	params => {
 		try {
 			const existing = loadState();
-			if (existing && existing.stage !== 'done' && existing.stage !== 'idle') {
+			// 'idle' is a legacy stage from v0.1.0 — treat it as "no active session"
+			// Cast through string to safely check for the legacy 'idle' value
+			// without bypassing TypeScript's type system with `as any`
+			const existingStage = existing ? (existing.stage as string) : '';
+			if (existing && existingStage !== 'done' && existingStage !== 'idle') {
 				return {
 					content: [
 						{
@@ -88,6 +91,10 @@ server.registerTool(
 				};
 			}
 
+			// Clean up residue from a previous 'done' session before creating a new one
+			if (existing && existingStage === 'done') {
+				deleteState();
+			}
 			const verifyCmd = params.verifyCommand ?? '';
 			const state = createState(params.goal, verifyCmd);
 
@@ -497,7 +504,7 @@ server.registerTool(
 	'oms-learn',
 	{
 		description:
-			'Extract reusable patterns from the current session and generate a SKILL.md file. The skill is saved to ~/.snow/skills/oms/ with a quality score.',
+			'Extract reusable patterns from the current session and orchestrate a skill evolution cycle (reflect → explore → evaluate) to generate an optimized SKILL.md.',
 		inputSchema: {
 			summary: z.string().describe('Summary of what was accomplished'),
 			patterns: z
@@ -510,6 +517,12 @@ server.registerTool(
 				.optional()
 				.describe(
 					'Name for the generated skill (defaults to "session_<sessionId>")',
+				),
+			maxIterations: z
+				.number()
+				.optional()
+				.describe(
+					'Maximum evolution iterations (default 2, hard max 5). Each iteration runs EmbodiSkill → SkillEvolver → darwin-skill.',
 				),
 		},
 	},
@@ -547,46 +560,76 @@ server.registerTool(
 					isError: true,
 				};
 			}
-
-			// Calculate quality score (0-100)
-			let qualityScore = 50;
-			if (patternsArr.length >= 3) qualityScore += 20;
-			if (params.summary.length > 100) qualityScore += 10;
-			if (state.logs.length > 5) qualityScore += 10;
-			if (state.tasks.length > 0 && state.tasks.every(t => t.completed))
-				qualityScore += 10;
-			qualityScore = Math.min(100, qualityScore);
-
-			// Quality gate: score must be >= 60 to persist
-			if (qualityScore < 60) {
+			if (!Array.isArray(patternsArr)) {
 				return {
 					content: [
 						{
 							type: 'text' as const,
-							text:
-								`⚠️ Quality score too low (${qualityScore}/100). Minimum is 60.\n\n` +
-								`To improve:\n` +
-								`- Provide at least 3 patterns\n` +
-								`- Write a detailed summary (>100 chars)\n` +
-								`- Complete all tasks before calling oms-learn`,
+							text: 'Error: "patterns" must be a JSON array, not an object or primitive.',
+						},
+					],
+					isError: true,
+				};
+			}
+			// Validate each pattern has required fields
+			for (const p of patternsArr) {
+				if (!p.name || !p.description) {
+					return {
+						content: [
+							{
+								type: 'text' as const,
+								text: 'Error: each pattern must have "name" and "description" fields.',
+							},
+						],
+						isError: true,
+					};
+				}
+			}
+
+			// Basic input quality gate (M5 fix: keep simple validation, remove complex scoring)
+			if (!params.summary || params.summary.trim().length === 0) {
+				return {
+					content: [
+						{
+							type: 'text' as const,
+							text: 'Error: "summary" must not be empty.',
+						},
+					],
+					isError: true,
+				};
+			}
+			if (patternsArr.length === 0) {
+				return {
+					content: [
+						{
+							type: 'text' as const,
+							text: 'Error: "patterns" must contain at least one pattern.',
 						},
 					],
 					isError: true,
 				};
 			}
 
-			// Generate SKILL.md
+			// Generate initial SKILL.md draft
 			const skillName = params.skillName || `session_${state.sessionId}`;
-			const skillDir = join(
-				process.env.HOME || process.env.USERPROFILE || '',
-				'.snow',
-				'skills',
-				'oms',
-				skillName,
-			);
-			mkdirSync(skillDir, {recursive: true});
 
-			const skillContent = `---
+			// Validate skillName (Phase 1 #1 path traversal fix)
+			if (!/^[a-zA-Z0-9_-]+$/.test(skillName)) {
+				return {
+					content: [
+						{
+							type: 'text' as const,
+							text: 'Error: skillName must be alphanumeric with underscores/hyphens only.',
+						},
+					],
+					isError: true,
+				};
+			}
+
+			const maxIter = Math.min(params.maxIterations ?? 2, 5); // Hard cap at 5
+
+			// Generate the initial SKILL.md draft content
+			const draftContent = `---
 name: ${skillName}
 description: ${params.summary.split('\n')[0].slice(0, 200)}
 ---
@@ -612,31 +655,65 @@ ${patternsArr
 				state.tasks.length
 			}
 - Turns: ${state.turnCount}
-- Quality score: ${qualityScore}/100
 
 ## Generated
 - Session: ${state.sessionId}
 - Date: ${new Date().toISOString()}
 `;
 
-			writeFileSync(join(skillDir, 'SKILL.md'), skillContent, 'utf-8');
+			// Save the draft to the skill directory
+			const skillDir = join(
+				process.env.HOME || process.env.USERPROFILE || '',
+				'.snow',
+				'skills',
+				'oms',
+				skillName,
+			);
+			mkdirSync(skillDir, {recursive: true});
+			writeFileSync(join(skillDir, 'SKILL.md'), draftContent, 'utf-8');
 
 			// Log the learning
 			addLog(
 				state,
-				`Skill generated: ${skillName} (quality: ${qualityScore}/100)`,
+				`Skill draft generated: ${skillName}. Starting evolution cycle (max ${maxIter} iterations).`,
 			);
 
+			// Return orchestration instructions for the skill evolution pipeline
 			return {
 				content: [
 					{
 						type: 'text' as const,
 						text:
-							`✅ Skill generated: ${skillName}\n` +
-							`  Quality score: ${qualityScore}/100\n` +
+							`✅ Skill draft generated: ${skillName}\n` +
+							`  Location: ${skillDir}/SKILL.md\n` +
 							`  Patterns: ${patternsArr.length}\n` +
-							`  Location: ${skillDir}/SKILL.md\n\n` +
-							`Use \`/skill ${skillName}\` to load this skill in future sessions.`,
+							`  Max iterations: ${maxIter}\n\n` +
+							`## Skill Evolution Pipeline\n\n` +
+							`The initial draft has been saved. Now execute the evolution cycle:\n\n` +
+							`### Iteration 1/${maxIter}\n\n` +
+							`**Step 1: EmbodiSkill — Skill-Aware Reflection**\n` +
+							`- Load the skill: \`/skill embodi-skill\`\n` +
+							`- Analyze the current draft against the session trajectory\n` +
+							`- Input: The draft at ${skillDir}/SKILL.md + session data (stageHistory, logs, tasks)\n` +
+							`- Output: A JSON array of revision signals (DISCOVERY, OPTIMIZATION, SKILL_DEFECT, EXECUTION_LAPSE)\n\n` +
+							`**Step 2: SkillEvolver — Strategy Exploration**\n` +
+							`- Load the skill: \`/skill skill-evolver\`\n` +
+							`- For each revision signal, generate K=4 distinct strategies (max 8 total candidates)\n` +
+							`- Deploy and test each candidate, then audit for overfitting\n` +
+							`- Select the best candidate\n\n` +
+							`**Step 3: Darwin-Skill — Evaluation & Ratchet**\n` +
+							`- Load the skill: \`/skill darwin-skill\`\n` +
+							`- Score the candidate across 9 dimensions (total 100 points)\n` +
+							`- Apply ratchet: if score > baseline → KEEP, else → REVERT\n` +
+							`- **Present the score breakdown and diff to the user** — wait for their confirmation before continuing\n\n` +
+							`### Convergence Check\n` +
+							`- If EmbodiSkill returns 0 revision signals AND darwin-skill score ≥ 80 → converged, save final skill\n` +
+							`- If this is the last iteration (iteration ${maxIter}/${maxIter}) → save current best result\n` +
+							`- Otherwise → proceed to Iteration 2/${maxIter} (return to Step 1)\n\n` +
+							`**Important:**\n` +
+							`- You are performing iteration 1 of ${maxIter}. Include this count in your progress updates.\n` +
+							`- If this is the last iteration, save the current best result as the final skill.\n` +
+							`- After each darwin-skill evaluation, pause and ask the user: "Do you want to keep this version?" before proceeding.`,
 					},
 				],
 			};

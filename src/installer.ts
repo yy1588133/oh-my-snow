@@ -12,7 +12,7 @@
  *   3. Merges 18 oms_* agents into ~/.snow/sub-agents.json
  *   4. Copies skills from assets/skills/oms/ to ~/.snow/skills/oms/
  *   5. Copies commands from assets/commands/oms/ to ~/.snow/commands/oms/
- *   6. Copies hook scripts (*.mjs) to <project>/.snow/oms-state/ (按项目部署)
+ *   6. Copies hook scripts (*.mjs) to <project>/.snow/oms-state/ (deployed per-project)
  *   7. Copies hook config JSONs to <project>/.snow/hooks/ (merging with existing)
  *   8. Creates .snow/oms-state/ directory
  *
@@ -309,6 +309,14 @@ function setupHooks(packageDir: string): void {
 				`  ✓ ${hookScriptCount} hook scripts copied to ${hooksTargetDir}`,
 			),
 		);
+
+		// Copy lib directory (shared utilities for hooks)
+		const libSourceDir = join(hooksSourceDir, 'lib');
+		if (existsSync(libSourceDir)) {
+			const libTargetDir = join(hooksTargetDir, 'lib');
+			cpSync(libSourceDir, libTargetDir, {recursive: true});
+			console.log(c.green(`  ✓ Shared lib copied to ${libTargetDir}`));
+		}
 	} else {
 		console.warn(
 			c.yellow('  ⚠️  Warning: hooks/ directory not found in package.'),
@@ -629,9 +637,9 @@ ${c.bold('Commands:')}
 ${c.bold('Setup details:')}
   • Registers MCP server in ~/.snow/settings.json
   • Merges 18 sub-agents into ~/.snow/sub-agents.json
-  • Copies 7 skills to ~/.snow/skills/oms/
+  • Copies 10 skills to ~/.snow/skills/oms/
   • Copies 9 commands to ~/.snow/commands/oms/
-  • Copies 4 hook scripts to <project>/.snow/oms-state/
+  • Copies 4 hook scripts + shared lib to <project>/.snow/oms-state/
   • Merges 4 hook configs into <project>/.snow/hooks/
   • Creates <project>/.snow/oms-state/ for session state
 

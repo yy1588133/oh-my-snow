@@ -18,46 +18,7 @@
  *   This ensures the hook only fires for filesystem WRITE tools.
  */
 
-import { readFileSync, existsSync } from 'fs';
-import { join } from 'path';
-
-// ── Path helpers ──
-
-function getStateDir() {
-	const envDir = process.env.OMS_STATE_DIR;
-	if (envDir) return envDir;
-	return join(process.cwd(), '.snow', 'oms-state');
-}
-
-function getStateFilePath() {
-	return join(getStateDir(), 'state.json');
-}
-
-function loadState() {
-	const filePath = getStateFilePath();
-	if (!existsSync(filePath)) return null;
-	try {
-		return JSON.parse(readFileSync(filePath, 'utf-8'));
-	} catch {
-		return null;
-	}
-}
-
-// ── Read context from stdin ──
-
-function readStdin() {
-	return new Promise((resolve) => {
-		let data = '';
-		process.stdin.setEncoding('utf-8');
-		process.stdin.on('data', (chunk) => {
-			data += chunk;
-		});
-		process.stdin.on('end', () => {
-			resolve(data);
-		});
-		setTimeout(() => resolve(data), 100);
-	});
-}
+import { loadState, readStdin, appendErrorLog } from './lib/oms-state.mjs';
 
 // ── Stage enforcement matrix ──
 
@@ -111,13 +72,9 @@ function checkStageEnforcement(stage, toolName) {
 						`[OMS:BLOCKED] The orchestration session is DONE — no further file edits allowed.\n\n` +
 						`If you need to make more changes, start a new session with oms-start.`,
 				};
-			case 'idle':
-				return {
-					allowed: false,
-					reason:
-						`[OMS:BLOCKED] No active OMS session. Call oms-start to begin an orchestration session first.`,
-				};
 			// executing and fixing stages allow file edits
+			// Note: 'idle' is handled by loadState()'s migration to 'planning',
+			// so it never reaches this function as 'idle'.
 			default:
 				return { allowed: true, reason: '' };
 		}
@@ -181,8 +138,7 @@ async function main() {
 	// Tool is allowed
 	process.exit(0);
 }
-
-main().catch(() => {
-	// On any error, fail-open (allow the tool)
-	process.exit(0);
+main().catch((error) => {
+	appendErrorLog(`beforeToolCall error: ${error.message}`);
+	process.exit(0); // fail-open
 });

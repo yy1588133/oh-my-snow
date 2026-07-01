@@ -15,86 +15,21 @@
  * { messages: [...] }
  */
 
-import { readFileSync, existsSync, writeFileSync, mkdirSync } from 'fs';
+import { existsSync, unlinkSync } from 'fs';
 import { join } from 'path';
 import { execSync } from 'child_process';
-
-// ── Path helpers (must match store.ts logic) ──
-
-function getStateDir() {
-	const envDir = process.env.OMS_STATE_DIR;
-	if (envDir) return envDir;
-	return join(process.cwd(), '.snow', 'oms-state');
-}
-
-function getStateFilePath() {
-	return join(getStateDir(), 'state.json');
-}
-
-function loadState() {
-	const filePath = getStateFilePath();
-	if (!existsSync(filePath)) return null;
-	try {
-		return JSON.parse(readFileSync(filePath, 'utf-8'));
-	} catch {
-		return null;
-	}
-}
-
-function saveState(state) {
-	ensureStateDir();
-	writeFileSync(getStateFilePath(), JSON.stringify(state, null, 2), 'utf-8');
-}
-
-function ensureStateDir() {
-	const dir = getStateDir();
-	if (!existsSync(dir)) {
-		mkdirSync(dir, { recursive: true });
-	}
-}
-
-// ── Read context from stdin ──
-
-function readStdin() {
-	return new Promise((resolve) => {
-		let data = '';
-		process.stdin.setEncoding('utf-8');
-		process.stdin.on('data', (chunk) => {
-			data += chunk;
-		});
-		process.stdin.on('end', () => {
-			resolve(data);
-		});
-		setTimeout(() => resolve(data), 100);
-	});
-}
+import { getStateDir, loadState, saveState, detectVerifyCommand, readStdin, appendErrorLog, forceSetStage } from './lib/oms-state.mjs';
 
 // ── Git diff detection ──
 
 function getGitDiffStat() {
 	try {
-		const output = execSync('git diff --stat', {
+		return execSync('git diff HEAD --stat', {
 			cwd: process.cwd(),
 			encoding: 'utf-8',
 			timeout: 5000,
 			stdio: ['pipe', 'pipe', 'pipe'],
-		});
-		return output.trim();
-	} catch {
-		// Git not available, not a git repo, or diff failed
-		return null;
-	}
-}
-
-function getGitStagedDiffStat() {
-	try {
-		const output = execSync('git diff --cached --stat', {
-			cwd: process.cwd(),
-			encoding: 'utf-8',
-			timeout: 5000,
-			stdio: ['pipe', 'pipe', 'pipe'],
-		});
-		return output.trim();
+		}).trim();
 	} catch {
 		return null;
 	}
@@ -108,17 +43,18 @@ function buildContinuationPrompt(state, gitDiff) {
 	const goal = state.goal;
 	const tasks = state.tasks;
 	const completedTasks = tasks.filter((t) => t.completed);
-	const remainingTasks = tasks.filter((t) => !t.completed);
 
 	let diffSection = '';
-	if (gitDiff) {
+	if (gitDiff == null) {
+		diffSection = '\n(git not available — cannot detect changes)\n';
+	} else if (gitDiff.length === 0) {
+		diffSection = '\n(No git changes detected)\n';
+	} else {
 		// Truncate to last 1000 chars if too long
 		const truncated = gitDiff.length > 1000
 			? '... ' + gitDiff.slice(-1000)
 			: gitDiff;
 		diffSection = `\nChanges detected:\n${truncated}\n`;
-	} else {
-		diffSection = '\n(No git changes detected or git not available)\n';
 	}
 
 	switch (stage) {
@@ -183,8 +119,8 @@ Continue fixing the issues.
 function checkTextBypass(state, gitDiff) {
 	// If the AI claims to have made changes but git diff shows nothing,
 	// and we're in executing/fixing stage, warn the AI
-	if (state.stage === 'executing' || state.stage === 'fixing') {
-		if (!gitDiff || gitDiff.length === 0) {
+	if ((state.stage === 'executing' || state.stage === 'fixing') && state.turnCount > 1) {
+		if (gitDiff != null && gitDiff.length === 0) {
 			return true; // Bypass detected
 		}
 	}
@@ -203,20 +139,103 @@ async function main() {
 		process.exit(0);
 	}
 
-	// Don't continue if session is done
-	if (state.stage === 'done') {
+	// Build error prefix (populated if pending-verify marker triggers a failed build)
+	let buildErrorPrefix = '';
+
+	// Run build verification if .pending-verify marker exists (set by afterToolCall).
+	// The marker means "a file was edited and needs verification" — this must run
+	// regardless of current stage, including 'done' (the AI may have rushed to done
+	// in the same turn as an edit).
+	const markerPath = join(getStateDir(), '.pending-verify');
+	if (existsSync(markerPath)) {
+		// Run verification, then clean up marker
+		try {
+			const verifyCmd = detectVerifyCommand(state);
+			if (verifyCmd) {
+				try {
+					execSync(verifyCmd, {
+						cwd: process.cwd(),
+						encoding: 'utf-8',
+						timeout: 110000,
+						stdio: ['pipe', 'pipe', 'pipe'],
+					});
+					// Build succeeded — no error prefix
+				} catch (error) {
+					// Build failed — prepend build error to continuation prompt
+					const buildError = error.stderr || error.stdout || error.message || 'Unknown build error';
+					const truncated = buildError.length > 2000 ? '...\n' + buildError.slice(-2000) : buildError;
+					buildErrorPrefix =
+						`[OMS:BUILD FAILED] Auto-verification command: "${verifyCmd}"\n\n` +
+						`The build/test check failed after your edits.\n` +
+						`You must fix the build errors before proceeding.\n\n` +
+						`Build output:\n${truncated}\n\n` +
+						`Fix the errors above.\n` +
+						`If you're in the "verifying" stage, switch to "fixing": oms-set-stage { stage: "fixing" }\n\n`;
+				}
+			}
+		} finally {
+			// Always remove the marker, even on failure
+			try { unlinkSync(markerPath); } catch {}
+		}
+	}
+
+	// If session is done and build succeeded, end the conversation.
+	// (done + build failure falls through to turn count increment + stage transition below)
+	if (state.stage === 'done' && !buildErrorPrefix) {
 		process.exit(0);
 	}
 
-	// Increment turn count
+	// ── Merged: turn count increment + optional force-transition + single save ──
+
+	// 1. Increment turn count FIRST (Test 23 expects turnCount === 2)
 	state.turnCount = (state.turnCount || 0) + 1;
 	state.updatedAt = new Date().toISOString();
+
+	// 2. If done + build failure: force-transition to fixing (mutates only, no save)
+	//    Use a flag to track whether force-transition actually occurred,
+	//    so we don't falsely show "STAGE TRANSITION" when already in 'fixing'.
+	const forceTransitioned = (state.stage === 'done' && buildErrorPrefix);
+	if (forceTransitioned) {
+		forceSetStage(state, 'fixing');
+	}
+
+	// 3. Single saveState call (covers both normal and force-transition paths)
 	saveState(state);
 
+	// 4. If force-transitioned: inject transition message and exit
+	if (forceTransitioned) {
+		buildErrorPrefix =
+			`[OMS:STAGE TRANSITION] done → fixing — you can now edit files to fix the build errors.\n\n` +
+			buildErrorPrefix;
+		process.stderr.write(buildErrorPrefix);
+		process.exit(2);
+	}
+
+	// Prevent infinite loops — hard stop after grace period, soft warning at limit
+	const MAX_TURNS = 50;
+	const HARD_STOP = MAX_TURNS + 5; // 5 grace turns to wrap up
+
+	// Hard stop: end the conversation entirely (fail-open)
+	if (state.turnCount > HARD_STOP) {
+		process.stderr.write('[OMS:HARD STOP] Session force-stopped after exceeding maximum turns.');
+		process.exit(0);
+	}
+
+	// Soft warning: inject a wrap-up message, but let the AI continue
+	if (state.turnCount > MAX_TURNS) {
+		const maxTurnsMsg =
+			`[OMS:MAX TURNS] Reached ${MAX_TURNS} turns. Stopping to prevent infinite loop.\n\n` +
+			`Goal: ${state.goal}\n` +
+			`Stage: ${state.stage}\n` +
+			`Tasks: ${state.tasks.filter(t => t.completed).length}/${state.tasks.length} completed\n\n` +
+			`Please wrap up your current work. Call oms-set-stage { stage: "done" } if you are finished, or oms-stop to end the session.\n` +
+			`Note: The session will be force-stopped at turn ${HARD_STOP}.`;
+		process.stderr.write(maxTurnsMsg);
+		process.exit(2);
+	}
+
 	// Get git diff
-	const gitDiff = getGitDiffStat();
-	const gitStagedDiff = getGitStagedDiffStat();
-	const fullDiff = [gitDiff, gitStagedDiff].filter(Boolean).join('\n') || null;
+	const fullDiff = getGitDiffStat();
 
 	// Check for text bypass
 	const bypassDetected = checkTextBypass(state, fullDiff);
@@ -224,17 +243,26 @@ async function main() {
 	// Build continuation prompt
 	let prompt = buildContinuationPrompt(state, fullDiff);
 
+	if (!prompt) {
+		// No continuation needed — but if there was a build error, inject it
+		if (buildErrorPrefix) {
+			process.stderr.write(buildErrorPrefix);
+			process.exit(2);
+		}
+		process.exit(0);
+	}
+
 	if (bypassDetected && prompt) {
 		// Prepend warning about text bypass
 		prompt =
-			`⚠️ WARNING: No file changes detected via git diff, but you may have claimed to make changes.\n` +
+			`⚠️ WARNING: No file changes detected via git diff, but you may have claimed to have changes.\n` +
 			`Please use filesystem-* tools (filesystem-edit, filesystem-create, filesystem-replaceedit) to actually modify files.\n\n` +
 			prompt;
 	}
 
-	if (!prompt) {
-		// No continuation needed
-		process.exit(0);
+	// Prepend build error (if any) to the continuation prompt
+	if (buildErrorPrefix) {
+		prompt = buildErrorPrefix + prompt;
 	}
 
 	// Exit code 2: inject user message + continue conversation
@@ -242,7 +270,7 @@ async function main() {
 	process.exit(2);
 }
 
-main().catch(() => {
-	// On any error, let the conversation end normally (fail-open)
-	process.exit(0);
+main().catch((error) => {
+	appendErrorLog(`onStop error: ${error.message}`);
+	process.exit(0); // fail-open
 });

@@ -14,48 +14,7 @@
  * { message: string, imageCount: number, ... }
  */
 
-import { readFileSync, existsSync } from 'fs';
-import { join } from 'path';
-import { platform } from 'os';
-
-// ── Path helpers (must match store.ts logic) ──
-
-function getStateDir() {
-	const envDir = process.env.OMS_STATE_DIR;
-	if (envDir) return envDir;
-	return join(process.cwd(), '.snow', 'oms-state');
-}
-
-function getStateFilePath() {
-	return join(getStateDir(), 'state.json');
-}
-
-function loadState() {
-	const filePath = getStateFilePath();
-	if (!existsSync(filePath)) return null;
-	try {
-		return JSON.parse(readFileSync(filePath, 'utf-8'));
-	} catch {
-		return null;
-	}
-}
-
-// ── Read context from stdin ──
-
-function readStdin() {
-	return new Promise((resolve) => {
-		let data = '';
-		process.stdin.setEncoding('utf-8');
-		process.stdin.on('data', (chunk) => {
-			data += chunk;
-		});
-		process.stdin.on('end', () => {
-			resolve(data);
-		});
-		// Timeout fallback — if stdin is not piped, resolve after 100ms
-		setTimeout(() => resolve(data), 100);
-	});
-}
+import { loadState, readStdin, appendErrorLog } from './lib/oms-state.mjs';
 
 // ── Stage-specific prompts ──
 
@@ -132,11 +91,18 @@ Instructions:
 	}
 }
 
-// ── Main ──
-
 async function main() {
-	// Read stdin context (we don't strictly need it, but consume it)
-	await readStdin();
+	// Read stdin context and extract user message
+	const stdinData = await readStdin();
+	let context = {};
+	try {
+		if (stdinData.trim()) {
+			context = JSON.parse(stdinData);
+		}
+	} catch {
+		// Can't parse context — preserve original message (fail-open)
+		process.exit(0);
+	}
 
 	const state = loadState();
 	if (!state) {
@@ -149,16 +115,12 @@ async function main() {
 		process.exit(0);
 	}
 
-	// Exit code 1: stderr replaces the user's message
-	// The user's original message is prepended for context
-	const originalMessage = ''; // We don't have the original message in stderr mode
-	// Note: Snow CLI replaces the ENTIRE user message with stderr content
-	// So we include the stage guidance as the new message content
-	process.stderr.write(prompt);
+	// Prepend the user's original message to the stage guidance
+	const userMsg = context.message || '';
+	process.stderr.write(userMsg ? `${userMsg}\n\n---\n${prompt}` : prompt);
 	process.exit(1);
 }
-
-main().catch(() => {
-	// On any error, let the original message through (fail-open)
-	process.exit(0);
+main().catch((error) => {
+	appendErrorLog(`onUserMessage error: ${error.message}`);
+	process.exit(0); // fail-open
 });
