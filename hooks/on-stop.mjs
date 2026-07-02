@@ -17,10 +17,53 @@
  * { messages: [...] }
  */
 
-import { existsSync, unlinkSync } from 'fs';
+import { existsSync, unlinkSync, readFileSync } from 'fs';
 import { join } from 'path';
 import { execSync } from 'child_process';
 import { getStateDir, loadState, saveState, detectVerifyCommand, readStdin, appendErrorLog, forceSetStage } from './lib/oms-state.mjs';
+
+// ── Ralph PRD helper (read-only — writes go through the MCP oms-prd tool) ──
+//
+// on-stop only needs to SURFACE PRD progress in the continuation prompt so the
+// AI knows which story to work on next. All mutations happen via the oms-prd
+// MCP tool (backed by store.ts). This reads prd.json directly to avoid a
+// runtime dependency on the compiled store.js (hooks are plain .mjs scripts).
+
+function loadPrd() {
+	const prdPath = join(getStateDir(), 'prd.json');
+	if (!existsSync(prdPath)) return null;
+	try {
+		return JSON.parse(readFileSync(prdPath, 'utf-8'));
+	} catch {
+		return null;
+	}
+}
+
+function buildPrdSection(prd) {
+	if (!prd || !prd.refined) {
+		return prd
+			? '\nPRD: scaffold created but NOT refined — call oms-prd action "refine" with task-specific stories before looping.\n'
+			: '';
+	}
+	// Guard against a malformed prd.json (manual edit / torn write) — without this,
+	// prd.stories.filter below throws TypeError and crashes the onStop hook.
+	if (!Array.isArray(prd.stories)) {
+		return '\nPRD: malformed prd.json (stories is not an array). Run oms-prd action "status" via the MCP tool to inspect.\n';
+	}
+	const passed = prd.stories.filter((s) => s && s.passes).length;
+	const total = prd.stories.length;
+	// Sort a COPY so we never mutate the loaded prd object (matters if loadPrd
+	// is ever cached; harmless today but avoids a latent footgun).
+	const sorted = [...prd.stories].sort((a, b) => a.priority - b.priority);
+	const next = sorted.filter((s) => !s.passes)[0];
+	const storyLines = sorted
+		.map((s) => `  [${s.passes ? '✓' : '○'}] ${s.id} [P${s.priority}]: ${s.title}`)
+		.join('\n');
+	const nextBlock = next
+		? `\nNext story: ${next.id} — ${next.title}\n  Call oms-prd action "next-story" for full acceptance criteria.\n`
+		: '\nAll stories pass — proceed to reviewer verification (call #oms_reviewer or #oms_architect).\n';
+	return `\nPRD Progress (${passed}/${total} stories passed):\n${storyLines}\n${nextBlock}`;
+}
 
 // ── Git diff detection ──
 
@@ -116,12 +159,18 @@ Drive standby teammates yourself via message_teammate.`;
 			const taskList = tasks
 				.map((t) => `  [${t.completed ? '✓' : '○'}] ${t.id}: ${t.description}`)
 				.join('\n');
+			// Ralph mode: if a PRD exists, surface its progress so the AI knows
+			// which story to work on next. No-op when Ralph isn't active.
+			const prd = loadPrd();
+			const prdSection = buildPrdSection(prd);
+			const ralphHint = prd
+				? `\nRalph mode active. Use oms-prd to manage stories; verify EACH acceptance criterion with fresh evidence before mark-passes.\n`
+				: '';
 			return `[OMS:CONTINUE] Executing — Turn ${turn}
 Goal: ${goal}
 ${diffSection}
 Tasks (${completedTasks.length}/${tasks.length}):
-${taskList}
-
+${taskList}${prdSection}${ralphHint}
 Continue implementing remaining tasks.
 Use oms-complete-task to mark tasks as done.
 When all tasks are complete, call oms-set-stage { stage: "verifying" }.`;

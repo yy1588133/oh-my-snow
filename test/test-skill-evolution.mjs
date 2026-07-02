@@ -249,17 +249,24 @@ async function runTests() {
 	// Group 4: Orchestration instruction structure — 3-step pipeline
 	// ──────────────────────────────────────────────
 
-	console.log('\n── Group 4: Pipeline Structure (diagnose → explore → evaluate) ──');
+	console.log('\n── Group 4: Pipeline Structure (reflect → explore → evaluate, inlined) ──');
 
+	// Self-contained: the learn skill inlines all methodology — no external /skill calls
 	assert(
-		'Step 1: EmbodiSkill mentioned',
-		responseText.includes('EmbodiSkill') || responseText.includes('embodi-skill'),
-		'missing EmbodiSkill reference',
+		'No external /skill calls in orchestration',
+		!responseText.includes('/skill embodi-skill') && !responseText.includes('/skill skill-evolver') && !responseText.includes('/skill darwin-skill'),
+		'orchestration still references external skills (regression)',
 	);
 	assert(
-		'Step 1: /skill embodi-skill command',
-		responseText.includes('/skill embodi-skill'),
-		'missing /skill embodi-skill command',
+		'Orchestration references Phase 4 of learn skill',
+		responseText.includes('Phase 4') && responseText.includes('learn'),
+		'missing Phase 4 / learn reference',
+	);
+
+	assert(
+		'Step 1 — Reflect mentioned',
+		responseText.includes('Reflect') || responseText.includes('reflect'),
+		'missing Step 1 reflect',
 	);
 	assert(
 		'Step 1: Revision signals mentioned',
@@ -268,14 +275,9 @@ async function runTests() {
 	);
 
 	assert(
-		'Step 2: SkillEvolver mentioned',
-		responseText.includes('SkillEvolver') || responseText.includes('skill-evolver'),
-		'missing SkillEvolver reference',
-	);
-	assert(
-		'Step 2: /skill skill-evolver command',
-		responseText.includes('/skill skill-evolver'),
-		'missing /skill skill-evolver command',
+		'Step 2 — Explore mentioned',
+		responseText.includes('Explore') || responseText.includes('explore'),
+		'missing Step 2 explore',
 	);
 	assert(
 		'Step 2: K=4 strategy exploration mentioned',
@@ -289,14 +291,9 @@ async function runTests() {
 	);
 
 	assert(
-		'Step 3: Darwin-Skill mentioned',
-		responseText.includes('darwin-skill') || responseText.includes('Darwin-Skill') || responseText.includes('Darwin'),
-		'missing Darwin-Skill reference',
-	);
-	assert(
-		'Step 3: /skill darwin-skill command',
-		responseText.includes('/skill darwin-skill'),
-		'missing /skill darwin-skill command',
+		'Step 3 — Evaluate mentioned',
+		responseText.includes('Evaluate') || responseText.includes('evaluate'),
+		'missing Step 3 evaluate',
 	);
 	assert(
 		'Step 3: 9 dimensions mentioned',
@@ -572,88 +569,86 @@ async function runTests() {
 	// Group 10: SKILL.md files exist for all three pipeline skills
 	// ──────────────────────────────────────────────
 
-	console.log('\n── Group 10: Pipeline SKILL.md Files Exist ──');
+	console.log('\n── Group 10: Learn skill inlines the full pipeline methodology ──');
 
 	const skillsBasePath = join(process.cwd(), 'assets', 'skills', 'oms');
 
+	// The three standalone skills were merged INTO the learn skill — verify learn/SKILL.md
+	// self-contains the entire reflect → explore → evaluate methodology.
 	assert(
-		'darwin-skill SKILL.md exists',
-		existsSync(join(skillsBasePath, 'darwin-skill', 'SKILL.md')),
-		'missing darwin-skill/SKILL.md',
+		'learn SKILL.md exists',
+		existsSync(join(skillsBasePath, 'learn', 'SKILL.md')),
+		'missing learn/SKILL.md',
 	);
 	assert(
-		'skill-evolver SKILL.md exists',
-		existsSync(join(skillsBasePath, 'skill-evolver', 'SKILL.md')),
-		'missing skill-evolver/SKILL.md',
-	);
-	assert(
-		'embodi-skill SKILL.md exists',
-		existsSync(join(skillsBasePath, 'embodi-skill', 'SKILL.md')),
-		'missing embodi-skill/SKILL.md',
-	);
-
-	// Verify darwin-skill has 9 dimensions
-	const darwinContent = readFileSync(join(skillsBasePath, 'darwin-skill', 'SKILL.md'), 'utf-8');
-	assert(
-		'darwin-skill has 9-dimension rubric',
-		darwinContent.includes('9-Dimension') || darwinContent.includes('9 dimension'),
-		'missing 9-dimension rubric',
-	);
-	assert(
-		'darwin-skill has ratchet mechanism',
-		darwinContent.includes('Ratchet') || darwinContent.includes('ratchet'),
-		'missing ratchet mechanism',
-	);
-	assert(
-		'darwin-skill has convergence criteria (score >= 80)',
-		darwinContent.includes('80'),
-		'missing convergence score threshold',
+		'standalone darwin-skill/embodi-skill/skill-evolver removed',
+		!existsSync(join(skillsBasePath, 'darwin-skill', 'SKILL.md')) &&
+			!existsSync(join(skillsBasePath, 'embodi-skill', 'SKILL.md')) &&
+			!existsSync(join(skillsBasePath, 'skill-evolver', 'SKILL.md')),
+		'standalone pipeline skills should be removed (merged into learn)',
 	);
 
-	// Verify embodi-skill has 4 signal types
-	const embodiContent = readFileSync(join(skillsBasePath, 'embodi-skill', 'SKILL.md'), 'utf-8');
+	const learnContent = readFileSync(join(skillsBasePath, 'learn', 'SKILL.md'), 'utf-8');
+
+	// Verify learn inlines the 9-dimension rubric (was in darwin-skill)
 	assert(
-		'embodi-skill has DISCOVERY signal',
-		embodiContent.includes('DISCOVERY'),
-		'missing DISCOVERY signal type',
+		'learn inlines 9-dimension rubric',
+		learnContent.includes('9-Dimension') || learnContent.includes('9 dimensions') || learnContent.includes('9 dimension'),
+		'missing 9-dimension rubric in learn',
 	);
 	assert(
-		'embodi-skill has OPTIMIZATION signal',
-		embodiContent.includes('OPTIMIZATION'),
-		'missing OPTIMIZATION signal type',
+		'learn inlines ratchet mechanism',
+		learnContent.includes('Ratchet') || learnContent.includes('ratchet'),
+		'missing ratchet mechanism in learn',
 	);
 	assert(
-		'embodi-skill has SKILL_DEFECT signal',
-		embodiContent.includes('SKILL_DEFECT'),
-		'missing SKILL_DEFECT signal type',
-	);
-	assert(
-		'embodi-skill has EXECUTION_LAPSE signal',
-		embodiContent.includes('EXECUTION_LAPSE'),
-		'missing EXECUTION_LAPSE signal type',
+		'learn inlines convergence score >= 80',
+		learnContent.includes('80'),
+		'missing convergence score threshold in learn',
 	);
 
-	// Verify skill-evolver has K=4 and audit
-	const evolverContent = readFileSync(join(skillsBasePath, 'skill-evolver', 'SKILL.md'), 'utf-8');
+	// Verify learn inlines the 4 revision signals (was in embodi-skill)
 	assert(
-		'skill-evolver has K=4 strategy exploration',
-		evolverContent.includes('K=4'),
-		'missing K=4 strategy exploration',
+		'learn inlines DISCOVERY signal',
+		learnContent.includes('DISCOVERY'),
+		'missing DISCOVERY signal type in learn',
 	);
 	assert(
-		'skill-evolver has candidate cap (8)',
-		evolverContent.includes('8'),
-		'missing candidate cap',
+		'learn inlines OPTIMIZATION signal',
+		learnContent.includes('OPTIMIZATION'),
+		'missing OPTIMIZATION signal type in learn',
 	);
 	assert(
-		'skill-evolver has independent audit',
-		evolverContent.includes('audit') || evolverContent.includes('Audit'),
-		'missing audit step',
+		'learn inlines SKILL_DEFECT signal',
+		learnContent.includes('SKILL_DEFECT'),
+		'missing SKILL_DEFECT signal type in learn',
 	);
 	assert(
-		'skill-evolver has overfitting checks',
-		evolverContent.includes('overfitting') || evolverContent.includes('Hardcoded') || evolverContent.includes('hardcoded'),
-		'missing overfitting check',
+		'learn inlines EXECUTION_LAPSE signal',
+		learnContent.includes('EXECUTION_LAPSE'),
+		'missing EXECUTION_LAPSE signal type in learn',
+	);
+
+	// Verify learn inlines K=4 + audit (was in skill-evolver)
+	assert(
+		'learn inlines K=4 strategy exploration',
+		learnContent.includes('K=4'),
+		'missing K=4 strategy exploration in learn',
+	);
+	assert(
+		'learn inlines candidate cap (8)',
+		learnContent.includes('8'),
+		'missing candidate cap in learn',
+	);
+	assert(
+		'learn inlines independent audit',
+		learnContent.includes('audit') || learnContent.includes('Audit'),
+		'missing audit step in learn',
+	);
+	assert(
+		'learn inlines overfitting checks',
+		learnContent.includes('overfitting') || learnContent.includes('Hardcoded') || learnContent.includes('hardcoded'),
+		'missing overfitting check in learn',
 	);
 
 	// ──────────────────────────────────────────────

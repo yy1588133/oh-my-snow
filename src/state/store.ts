@@ -147,41 +147,52 @@ function syncSleep(ms: number): void {
 }
 
 /**
- * Atomic write: write to temp file first, then rename.
- * This prevents corrupted state if the process is interrupted mid-write.
+ * Shared atomic-write primitive: acquire a lock, write to tmp, rename, release lock.
+ * Used by saveState (state.json), atomicWriteFile (prd.json), and setProjectTeamMode
+ * (project settings.json) so a single bugfix here fixes all three call sites.
+ *
+ * Behavior on lock contention (after MAX_RETRIES):
+ *   - onContention = 'skip'   → return false, no write (state.json — never corrupt)
+ *   - onContention = 'force'  → direct writeFileSync fallback (prd.json — better to lose
+ *                                an update than silently drop it during a Ralph loop)
+ *
+ * @returns true if the write succeeded (lock acquired + renamed, or forced write OK)
  */
-export function saveState(state: OmsState): void {
-	ensureStateDir();
-	const filePath = getStateFilePath();
-	const content = JSON.stringify(state, null, 2);
-
+function atomicWriteWithLock(
+	filePath: string,
+	content: string,
+	onContention: 'skip' | 'force' = 'skip',
+	dirOverride?: string,
+): boolean {
+	// Default to the OMS state dir; callers writing elsewhere (e.g. project
+	// settings.json) pass dirOverride so we mkdir that instead.
+	if (dirOverride) {
+		mkdirSync(dirOverride, {recursive: true});
+	} else {
+		ensureStateDir();
+	}
 	const lockPath = filePath + '.lock';
 
-	// Stale lock detection: if lock file is older than 120s, force-remove it
+	// Stale lock detection: force-remove locks older than 120s
 	if (existsSync(lockPath)) {
 		try {
 			const lockStat = statSync(lockPath);
-			const lockAge = Date.now() - lockStat.mtimeMs;
-			if (lockAge > 120000) {
+			if (Date.now() - lockStat.mtimeMs > 120000) {
 				unlinkSync(lockPath);
 			}
 		} catch {}
 	}
 
-	let fd: number | undefined;
 	let lockCreated = false;
-
-	// Retry loop: attempt to acquire lock up to 5 times with 50ms busy-wait delays
 	const MAX_RETRIES = 5;
 	const RETRY_DELAY_MS = 50;
 
 	for (let attempt = 0; attempt < MAX_RETRIES; attempt++) {
 		try {
-			fd = openSync(lockPath, 'wx'); // Atomic create, throws if exists
-			lockCreated = true;
+			const fd = openSync(lockPath, 'wx'); // atomic create — throws if exists
 			closeSync(fd);
-			fd = undefined;
-			break; // Lock acquired successfully
+			lockCreated = true;
+			break;
 		} catch {
 			if (attempt < MAX_RETRIES - 1) {
 				syncSleep(RETRY_DELAY_MS);
@@ -190,17 +201,26 @@ export function saveState(state: OmsState): void {
 	}
 
 	if (!lockCreated) {
-		// All retries exhausted — skip write to avoid data corruption from concurrent writes
+		if (onContention === 'force') {
+			// Fallback: direct write is better than losing the update (PRD loop)
+			try {
+				writeFileSync(filePath, content, 'utf-8');
+				return true;
+			} catch {
+				return false;
+			}
+		}
+		// onContention === 'skip': log and skip to avoid corrupting concurrent writes
 		try {
 			const logPath = join(getStateDir(), 'errors.log');
 			const timestamp = new Date().toISOString();
 			appendFileSync(
 				logPath,
-				`[${timestamp}] saveState: lock contention after retries, skipping write to avoid data corruption\n`,
+				`[${timestamp}] atomicWriteWithLock(${filePath}): lock contention after retries, skipping write\n`,
 				'utf-8',
 			);
 		} catch {}
-		return; // Skip write — do NOT fall through to the finally block
+		return false;
 	}
 
 	try {
@@ -215,6 +235,7 @@ export function saveState(state: OmsState): void {
 				unlinkSync(tmpPath);
 			} catch {}
 		}
+		return true;
 	} finally {
 		// Only delete the lock if THIS process created it.
 		// Deleting another process's lock breaks the mutual exclusion guarantee.
@@ -224,6 +245,14 @@ export function saveState(state: OmsState): void {
 			} catch {}
 		}
 	}
+}
+
+/**
+ * Atomic write: write to temp file first, then rename.
+ * This prevents corrupted state if the process is interrupted mid-write.
+ */
+export function saveState(state: OmsState): void {
+	atomicWriteWithLock(getStateFilePath(), JSON.stringify(state, null, 2), 'skip');
 }
 
 export function deleteState(): void {
@@ -374,63 +403,18 @@ export function setProjectTeamMode(enabled: boolean): boolean {
 
 	settings.teamMode = enabled;
 
-	// Atomic write: lock + tmp + rename (mirrors saveState's pattern)
-	mkdirSync(dirname(settingsPath), {recursive: true});
+	// Atomic write via the shared lock+tmp+rename primitive (skip on contention —
+	// the AI can retry oms-set-team; never corrupt settings.json with a torn write).
 	const content = JSON.stringify(settings, null, 2);
-
-	const lockPath = settingsPath + '.lock';
-
-	// Stale lock detection (120s threshold, same as saveState)
-	if (existsSync(lockPath)) {
-		try {
-			const lockStat = statSync(lockPath);
-			if (Date.now() - lockStat.mtimeMs > 120000) {
-				unlinkSync(lockPath);
-			}
-		} catch {}
-	}
-
-	let lockCreated = false;
-	const MAX_RETRIES = 5;
-	const RETRY_DELAY_MS = 50;
-	for (let attempt = 0; attempt < MAX_RETRIES; attempt++) {
-		try {
-			const fd = openSync(lockPath, 'wx');
-			closeSync(fd);
-			lockCreated = true;
-			break;
-		} catch {
-			if (attempt < MAX_RETRIES - 1) {
-				syncSleep(RETRY_DELAY_MS);
-			}
-		}
-	}
-
-	if (!lockCreated) {
-		// Lock contention — do NOT throw (would block the tool call).
-		// Surface via stderr and return false; the AI can retry oms-set-team.
+	const wrote = atomicWriteWithLock(
+		settingsPath,
+		content,
+		'skip',
+		dirname(settingsPath),
+	);
+	if (!wrote) {
 		console.error('[OMS] setProjectTeamMode: lock contention, skipping write');
 		return false;
-	}
-
-	try {
-		const tmpPath = settingsPath + '.tmp';
-		writeFileSync(tmpPath, content, 'utf-8');
-		try {
-			renameSync(tmpPath, settingsPath);
-		} catch {
-			// Cross-device fallback
-			writeFileSync(settingsPath, content, 'utf-8');
-			try {
-				unlinkSync(tmpPath);
-			} catch {}
-		}
-	} finally {
-		if (lockCreated) {
-			try {
-				unlinkSync(lockPath);
-			} catch {}
-		}
 	}
 
 	return true;
@@ -503,4 +487,401 @@ export function listSnapshots(
 export function saveVerifyCommandFile(cmd: string): void {
 	ensureStateDir();
 	writeFileSync(getVerifyCommandFilePath(), cmd, 'utf-8');
+}
+
+// ── Ralph PRD management ──
+//
+// PRD (Product Requirements Document) drives the Ralph persistence loop.
+// Each user story has testable acceptance criteria; Ralph iterates
+// story-by-story until every story has `passes: true` and is reviewer-verified.
+//
+// Files (stored in the same .snow/oms-state/ directory as state.json):
+//   - prd.json      : the PRD with stories and acceptance criteria
+//   - progress.txt  : append-only log of learnings across iterations
+//
+// Uses the same atomic write pattern (lock + tmp + rename) as saveState to
+// avoid corruption under concurrent access from MCP server and hooks.
+
+export interface AcceptanceCriterion {
+	/** The criterion text — must be concrete and testable */
+	criterion: string;
+	/** Whether this criterion has been verified with fresh evidence */
+	verified: boolean;
+}
+
+export interface PrdStory {
+	/** Story id, e.g. "US-001" */
+	id: string;
+	/** Short title of the story */
+	title: string;
+	/** Concrete, testable acceptance criteria */
+	acceptanceCriteria: AcceptanceCriterion[];
+	/** Whether ALL acceptance criteria are verified → story is complete */
+	passes: boolean;
+	/** Priority (lower = higher priority, foundational work first) */
+	priority: number;
+	/** When the story was created */
+	createdAt: string;
+	/** When the story's passes flag was last updated */
+	updatedAt: string;
+}
+
+export interface Prd {
+	/** The original task description Ralph is working on */
+	task: string;
+	/** Whether the PRD has been refined (scaffold replaced with task-specific stories) */
+	refined: boolean;
+	/** The user stories */
+	stories: PrdStory[];
+	/** When the PRD was created */
+	createdAt: string;
+	/** When the PRD was last updated */
+	updatedAt: string;
+}
+
+function getPrdFilePath(): string {
+	return join(getStateDir(), 'prd.json');
+}
+
+function getProgressFilePath(): string {
+	return join(getStateDir(), 'progress.txt');
+}
+
+/**
+ * Atomic write for prd.json — thin wrapper over atomicWriteWithLock.
+ * Uses 'force' contention policy: during a Ralph loop it's better to fall back
+ * to a direct write than to silently drop a story update.
+ */
+function atomicWriteFile(filePath: string, content: string): void {
+	atomicWriteWithLock(filePath, content, 'force');
+}
+
+/** Load the PRD. Returns null if no PRD file exists. */
+export function loadPrd(): Prd | null {
+	const filePath = getPrdFilePath();
+	if (!existsSync(filePath)) {
+		return null;
+	}
+	try {
+		const content = readFileSync(filePath, 'utf-8');
+		return JSON.parse(content) as Prd;
+	} catch {
+		return null;
+	}
+}
+
+function savePrd(prd: Prd): void {
+	prd.updatedAt = new Date().toISOString();
+	atomicWriteFile(getPrdFilePath(), JSON.stringify(prd, null, 2));
+}
+
+/**
+ * Create a scaffold PRD from a task description.
+ * The scaffold has a single generic story — the caller MUST refine it
+ * with task-specific acceptance criteria via refinePrd().
+ */
+export function initPrd(task: string): Prd {
+	const now = new Date().toISOString();
+	const prd: Prd = {
+		task,
+		refined: false,
+		stories: [
+			{
+				id: 'US-001',
+				title: 'Implement the task',
+				acceptanceCriteria: [
+					{
+						criterion: 'Implementation is complete',
+						verified: false,
+					},
+				],
+				passes: false,
+				priority: 1,
+				createdAt: now,
+				updatedAt: now,
+			},
+		],
+		createdAt: now,
+		updatedAt: now,
+	};
+	savePrd(prd);
+	return prd;
+}
+
+export interface RefinedStoryInput {
+	title: string;
+	acceptanceCriteria: string[]; // plain criterion texts — wrapped in AcceptanceCriterion
+	priority: number;
+}
+
+/**
+ * Replace the scaffold stories with task-specific refined stories.
+ * Sets refined: true so Ralph knows the PRD is ready for the loop.
+ *
+ * Also clears progress.txt: a refine is a (re)start of the PRD work, so any
+ * stale progress log from a prior task on the same state dir must not survive.
+ * Without this, logProgress entries from task A would linger under a header
+ * still naming task A while the PRD now describes task B.
+ */
+export function refinePrd(
+	task: string,
+	stories: RefinedStoryInput[],
+): Prd {
+	const existing = loadPrd();
+	const taskToUse = task || existing?.task || '';
+	const now = new Date().toISOString();
+
+	const refinedStories: PrdStory[] = stories.map((s, i) => ({
+		id: `US-${String(i + 1).padStart(3, '0')}`,
+		title: s.title,
+		acceptanceCriteria: s.acceptanceCriteria.map(criterion => ({
+			criterion,
+			verified: false,
+		})),
+		passes: false,
+		priority: s.priority,
+		createdAt: now,
+		updatedAt: now,
+	}));
+
+	const prd: Prd = {
+		task: taskToUse,
+		refined: true,
+		stories: refinedStories,
+		createdAt: existing?.createdAt || now,
+		updatedAt: now,
+	};
+	savePrd(prd);
+
+	// Drop any stale progress.txt so the next initProgress() rewrites the header
+	// with the (possibly new) task name and a clean slate.
+	const progressPath = getProgressFilePath();
+	if (existsSync(progressPath)) {
+		try {
+			unlinkSync(progressPath);
+		} catch {}
+	}
+
+	return prd;
+}
+
+/**
+ * Add a new story (discovered during implementation).
+ * Returns the added story.
+ */
+export function addPrdStory(
+	title: string,
+	acceptanceCriteria: string[],
+	priority: number,
+): PrdStory | null {
+	const prd = loadPrd();
+	if (!prd) {
+		return null;
+	}
+	const now = new Date().toISOString();
+	const nextId = `US-${String(prd.stories.length + 1).padStart(3, '0')}`;
+	const story: PrdStory = {
+		id: nextId,
+		title,
+		acceptanceCriteria: acceptanceCriteria.map(criterion => ({
+			criterion,
+			verified: false,
+		})),
+		passes: false,
+		priority,
+		createdAt: now,
+		updatedAt: now,
+	};
+	prd.stories.push(story);
+	savePrd(prd);
+	return story;
+}
+
+/** Get the highest-priority story with passes: false. Returns null if all pass. */
+export function getNextPrdStory(): PrdStory | null {
+	const prd = loadPrd();
+	if (!prd) {
+		return null;
+	}
+	const pending = prd.stories
+		.filter(s => !s.passes)
+		.sort((a, b) => a.priority - b.priority);
+	return pending[0] ?? null;
+}
+
+/** Get a story by id. */
+export function getPrdStory(storyId: string): PrdStory | null {
+	const prd = loadPrd();
+	if (!prd) {
+		return null;
+	}
+	return prd.stories.find(s => s.id === storyId) ?? null;
+}
+
+/**
+ * Mark a story's passes flag.
+ *
+ * NOTE: this ONLY flips `passes`. It does NOT touch `acceptanceCriteria[].verified`
+ * — verified flags must be set individually via setCriterionVerified() with
+ * fresh evidence per criterion. Forcing verified=true here would let an agent
+ * bypass per-criterion verification (the core Ralph invariant). The only place
+ * `passes` is auto-derived is setCriterionVerified (passes = allCriteriaVerified).
+ *
+ * When setting passes:false (unmark, on reviewer rejection), criteria verified
+ * flags are left as-is — the agent re-verifies them individually on the next pass.
+ */
+export function setPrdStoryPasses(
+	storyId: string,
+	passes: boolean,
+): PrdStory | null {
+	const prd = loadPrd();
+	if (!prd) {
+		return null;
+	}
+	const story = prd.stories.find(s => s.id === storyId);
+	if (!story) {
+		return null;
+	}
+	// Guard: refuse to mark passes:true unless every criterion is already verified.
+	// This enforces the "verify EACH criterion before mark-passes" invariant at the
+	// data layer — an agent can't skip per-criterion evidence and rubber-stamp a story.
+	if (passes && !story.acceptanceCriteria.every(c => c.verified)) {
+		return null;
+	}
+	story.passes = passes;
+	story.updatedAt = new Date().toISOString();
+	savePrd(prd);
+	return story;
+}
+
+/** Mark a single acceptance criterion as verified/unverified. */
+export function setCriterionVerified(
+	storyId: string,
+	criterionIndex: number,
+	verified: boolean,
+): PrdStory | null {
+	const prd = loadPrd();
+	if (!prd) {
+		return null;
+	}
+	const story = prd.stories.find(s => s.id === storyId);
+	if (!story) {
+		return null;
+	}
+	const criterion = story.acceptanceCriteria[criterionIndex];
+	if (!criterion) {
+		return null;
+	}
+	criterion.verified = verified;
+	story.updatedAt = new Date().toISOString();
+	// If all criteria verified, auto-set passes: true; if any unverified, passes: false
+	const allVerified = story.acceptanceCriteria.every(c => c.verified);
+	story.passes = allVerified;
+	savePrd(prd);
+	return story;
+}
+
+/** Get PRD completion summary. */
+export function getPrdStatus(): {
+	task: string;
+	refined: boolean;
+	total: number;
+	passed: number;
+	remaining: number;
+	stories: {id: string; title: string; passes: boolean; priority: number}[];
+} | null {
+	const prd = loadPrd();
+	if (!prd) {
+		return null;
+	}
+	const passed = prd.stories.filter(s => s.passes).length;
+	return {
+		task: prd.task,
+		refined: prd.refined,
+		total: prd.stories.length,
+		passed,
+		remaining: prd.stories.length - passed,
+		// Sort a COPY — sorting prd.stories in place would mutate the loaded
+		// object (a latent footgun if loadPrd ever caches/persists the reference).
+		stories: [...prd.stories]
+			.sort((a, b) => a.priority - b.priority)
+			.map(s => ({
+				id: s.id,
+				title: s.title,
+				passes: s.passes,
+				priority: s.priority,
+			})),
+	};
+}
+
+/** Initialize progress.txt. Returns true if created, false if already exists. */
+export function initProgress(): boolean {
+	const filePath = getProgressFilePath();
+	if (existsSync(filePath)) {
+		return false;
+	}
+	ensureStateDir();
+	const header = `# Ralph Progress Log\n# Task: ${loadPrd()?.task || '(unknown)'}\n# Created: ${new Date().toISOString()}\n\n`;
+	writeFileSync(filePath, header, 'utf-8');
+	return true;
+}
+
+/**
+ * Append a progress entry to progress.txt.
+ * Self-healing: if the file doesn't exist yet (initProgress was skipped or the
+ * process restarted), write the header first so logProgress never creates a
+ * headerless file that would permanently confuse initProgress's existsSync check.
+ */
+export function logProgress(message: string): void {
+	const filePath = getProgressFilePath();
+	ensureStateDir();
+	const timestamp = new Date().toISOString();
+	const entry = `[${timestamp}] ${message}\n`;
+	try {
+		if (!existsSync(filePath)) {
+			const header = `# Ralph Progress Log\n# Task: ${loadPrd()?.task || '(unknown)'}\n# Created: ${timestamp}\n\n`;
+			writeFileSync(filePath, header, 'utf-8');
+		}
+		appendFileSync(filePath, entry, 'utf-8');
+	} catch {
+		// Silently fail — logging must not crash the loop
+	}
+}
+
+/** Read progress.txt content. Returns empty string if not found. */
+export function readProgress(): string {
+	const filePath = getProgressFilePath();
+	if (!existsSync(filePath)) {
+		return '';
+	}
+	try {
+		return readFileSync(filePath, 'utf-8');
+	} catch {
+		return '';
+	}
+}
+
+/** Delete PRD files (called by oms-stop cleanup). */
+export function deletePrd(): void {
+	const prdPath = getPrdFilePath();
+	if (existsSync(prdPath)) {
+		try {
+			unlinkSync(prdPath);
+		} catch {}
+	}
+	const progressPath = getProgressFilePath();
+	if (existsSync(progressPath)) {
+		try {
+			unlinkSync(progressPath);
+		} catch {}
+	}
+	// Clean up lock/tmp files
+	for (const ext of ['.lock', '.tmp']) {
+		const p = prdPath + ext;
+		if (existsSync(p)) {
+			try {
+				unlinkSync(p);
+			} catch {}
+		}
+	}
 }

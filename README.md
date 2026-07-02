@@ -14,8 +14,8 @@ OMS wraps Snow CLI with a state machine, stage enforcement, auto-verification, a
 - 📸 **Snapshots** — Save and restore session state for long-running tasks
 - 🎓 **Learning** — Extract reusable patterns from sessions into SKILL.md files
 - 🤖 **18 specialized sub-agents** — Architecture, security, testing, research, and more, each with a structured `role` prompt ported from oh-my-claudecode (Role / Success Criteria / Constraints / Investigation Protocol / Final Checklist)
-- 📚 **10 skills** — Deep code analysis, execution tracing, cleanup, visual verification, and more
-- 🛠️ **20 commands** — 10 workflow commands (auto, plan, qa, goal, verify, release, save, stop, team, help) + 10 skill-mapping commands (interview, dive, trace, cleanup, vverify, wiki, research, darwin-skill, skill-evolver, embodi-skill)
+- 📚 **9 skills** — Deep code analysis, execution tracing, cleanup, visual verification, learning, ralph, and more
+- 🛠️ **17 commands** — 10 workflow commands (auto, plan, qa, goal, verify, release, save, stop, team, help) + 7 skill-mapping commands (interview, dive, trace, cleanup, vverify, wiki, research)
 
 ## Installation
 
@@ -28,8 +28,8 @@ The `oms setup` command:
 
 1. Registers the MCP server in `~/.snow/settings.json`
 2. Merges 18 sub-agents into `~/.snow/sub-agents.json`
-3. Copies 10 skills to `~/.snow/skills/oms/`
-4. Copies 20 commands to `~/.snow/commands/oms/` (10 workflow + 10 skill mappings)
+3. Copies 9 skills to `~/.snow/skills/oms/`
+4. Copies 17 commands to `~/.snow/commands/oms/` (10 workflow + 7 skill mappings)
 5. Installs 4 hook configs to `~/.snow/hooks/` (global, with absolute path commands pointing to the npm package)
 6. Creates `<project>/.snow/oms-state/` for session state (auto-created per project at runtime)
 
@@ -118,9 +118,6 @@ Each maps to a skill via the `skill-execute` tool — equivalent to `/skill oms/
 | `/oms:vverify <target>`    | `oms/vverify`    | Visual verification: UI screenshot comparison + visual consistency   |
 | `/oms:wiki <target>`       | `oms/wiki`       | Auto-generate wiki documentation from source code analysis           |
 | `/oms:research <question>` | `oms/research`   | Autonomous multi-step research combining web search and code analysis |
-| `/oms:darwin-skill <name>` | `oms/darwin-skill` | Evaluate skills across 9 dimensions + ratchet mechanism           |
-| `/oms:skill-evolver <t>`   | `oms/skill-evolver` | Skill lifecycle — author, deploy, test, refine skills            |
-| `/oms:embodi-skill <t>`    | `oms/embodi-skill`  | Skill-aware reflection from execution trajectories               |
 
 ## MCP Tools
 
@@ -149,9 +146,7 @@ Load a skill with `/skill oms/<name>`, or use the corresponding `/oms:<name>` co
 | `vverify`       | Visual verification: UI screenshot comparison + visual consistency               |
 | `wiki`          | Auto-generate wiki documentation from source code analysis                       |
 | `research`      | Autonomous multi-step research combining web search and code analysis            |
-| `darwin-skill`  | Evaluate skills across 9 dimensions + ratchet mechanism (keep only improvements) |
-| `skill-evolver` | Strategy-diversified exploration — author, deploy, test, refine skills           |
-| `embodi-skill`  | Skill-aware reflection — targeted revision signals from execution trajectories   |
+| `learn`         | Session-to-skill extractor + self-contained evolution pipeline (reflect → explore → evaluate) |
 
 ## Sub-Agents
 
@@ -305,9 +300,8 @@ oh-my-snow/
 │   │       ├── vverify/SKILL.md
 │   │       ├── wiki/SKILL.md
 │   │       ├── research/SKILL.md
-│   │       ├── darwin-skill/SKILL.md
-│   │       ├── skill-evolver/SKILL.md
-│   │       └── embodi-skill/SKILL.md
+│   │       ├── learn/SKILL.md
+│   │       └── ralph/SKILL.md
 │   ├── commands/
 │   │   └── oms/
 │   │       ├── auto.json

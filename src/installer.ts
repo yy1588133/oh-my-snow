@@ -37,6 +37,7 @@ import {
 import {join, dirname, resolve} from 'path';
 import {homedir} from 'os';
 import {fileURLToPath} from 'url';
+import {getTranslations} from './i18n/index.js';
 
 // ESM equivalent of CommonJS __dirname (package.json has "type": "module").
 // Without this, `__dirname` is undefined at runtime → `oms setup` crashes.
@@ -54,6 +55,9 @@ const GLOBAL_HOOKS_DIR = join(SNOW_DIR, 'hooks');
 
 const OMS_HOOK_DESCRIPTION_PREFIX = 'OMS:';
 
+// i18n — read once at startup. Language follows snow-cli's ~/.snow/language.json.
+const t = getTranslations().installer;
+
 // ── Color helpers ──
 
 const c = {
@@ -65,6 +69,36 @@ const c = {
 	dim: (s: string) => `\x1b[2m${s}\x1b[0m`,
 };
 
+/**
+ * Pad a string to a target DISPLAY width (not char count).
+ * CJK characters take 2 display columns; padEnd(48) counts them as 1, which
+ * breaks the right border ║ of the setup/uninstall banner for zh/zh-TW.
+ * This measures display width and pads with spaces accordingly.
+ */
+function padDisplay(str: string, width: number): string {
+	let displayWidth = 0;
+	for (const ch of str) {
+		// CJK Unified Ideographs + common CJK punctuation ~ width 2.
+		// Code point ranges: Hiragana/Katakana/CJK/CJK Ext/Fullwidth forms.
+		const cp = ch.codePointAt(0) ?? 0;
+		const isWide =
+			(cp >= 0x1100 && cp <= 0x115f) || // Hangul Jamo
+			(cp >= 0x2e80 && cp <= 0x303e) || // CJK radicals
+			(cp >= 0x3040 && cp <= 0x33bf) || // Hiragana/Katakana/CJK punct
+			(cp >= 0x3400 && cp <= 0x4dbf) || // CJK Ext A
+			(cp >= 0x4e00 && cp <= 0x9fff) || // CJK Unified
+			(cp >= 0xa000 && cp <= 0xa4cf) || // Yi
+			(cp >= 0xac00 && cp <= 0xd7a3) || // Hangul Syllables
+			(cp >= 0xf900 && cp <= 0xfaff) || // CJK Compat Ideographs
+			(cp >= 0xfe30 && cp <= 0xfe6f) || // CJK Compat Forms
+			(cp >= 0xff00 && cp <= 0xff60) || // Fullwidth Forms
+			(cp >= 0xffe0 && cp <= 0xffe6);
+		displayWidth += isWide ? 2 : 1;
+	}
+	const pad = Math.max(0, width - displayWidth);
+	return str + ' '.repeat(pad);
+}
+
 // ── Path discovery ──
 
 /** Find the global node_modules directory via `npm root -g`. */
@@ -73,7 +107,7 @@ function findGlobalNodeModules(): string {
 		return execSync('npm root -g', {encoding: 'utf-8'}).trim();
 	} catch {
 		throw new Error(
-			'Failed to find global node_modules path. Is npm installed and on PATH?',
+			t.errFindNodeModules,
 		);
 	}
 }
@@ -113,8 +147,7 @@ function findPackageDir(): string {
 	}
 
 	throw new Error(
-		'Could not find the oh-my-snow package directory. ' +
-			'Ensure it is installed globally (`npm install -g oh-my-snow`) or run from within the package directory.',
+		t.errFindPackageDir,
 	);
 }
 
@@ -144,7 +177,7 @@ function setupMcpConfig(packageDir: string): void {
 	if (!existsSync(mcpServerPath)) {
 		console.warn(
 			c.yellow(
-				'  ⚠️  Warning: dist/mcp-server.js not found. Run `npm run build` first.',
+				t.warnMcpNotFound,
 			),
 		);
 	}
@@ -166,7 +199,7 @@ function setupMcpConfig(packageDir: string): void {
 	};
 
 	writeJson(SETTINGS_PATH, settings);
-	console.log(c.green(`  ✓ MCP server config added to ${SETTINGS_PATH}`));
+	console.log(c.green(t.mcpConfigAdded(SETTINGS_PATH)));
 	console.log(c.dim(`    → node ${mcpServerPath}`));
 }
 
@@ -176,7 +209,7 @@ function setupSubAgents(packageDir: string): void {
 	const agentsPath = join(packageDir, 'assets', 'agents', 'sub-agents.json');
 	if (!existsSync(agentsPath)) {
 		console.warn(
-			c.yellow('  ⚠️  Warning: sub-agents.json not found in package assets.'),
+			c.yellow(t.warnSubAgentsNotFound),
 		);
 		return;
 	}
@@ -205,7 +238,7 @@ function setupSubAgents(packageDir: string): void {
 	writeJson(SUB_AGENTS_PATH, merged);
 	console.log(
 		c.green(
-			`  ✓ ${omsAgents.length} sub-agents merged into ${SUB_AGENTS_PATH}`,
+			t.subAgentsMerged(omsAgents.length, SUB_AGENTS_PATH),
 		),
 	);
 }
@@ -218,7 +251,7 @@ function setupSkills(packageDir: string): void {
 	if (!existsSync(skillsSource)) {
 		console.warn(
 			c.yellow(
-				'  ⚠️  Warning: skills/oms/ directory not found in package assets.',
+				t.warnSkillsNotFound,
 			),
 		);
 		return;
@@ -242,7 +275,7 @@ function setupSkills(packageDir: string): void {
 		// ignore
 	}
 
-	console.log(c.green(`  ✓ ${skillCount} skills copied to ${SKILLS_TARGET}`));
+	console.log(c.green(t.skillsCopied(skillCount, SKILLS_TARGET)));
 }
 
 // ── Setup: Commands ──
@@ -253,7 +286,7 @@ function setupCommands(packageDir: string): void {
 	if (!existsSync(commandsSource)) {
 		console.warn(
 			c.yellow(
-				'  ⚠️  Warning: commands/oms/ directory not found in package assets.',
+				t.warnCommandsNotFound,
 			),
 		);
 		return;
@@ -278,7 +311,7 @@ function setupCommands(packageDir: string): void {
 	}
 
 	console.log(
-		c.green(`  ✓ ${commandCount} commands copied to ${COMMANDS_TARGET}`),
+		c.green(t.commandsCopied(commandCount, COMMANDS_TARGET)),
 	);
 }
 
@@ -369,19 +402,19 @@ function setupHooks(packageDir: string): void {
 
 		console.log(
 			c.green(
-				`  ✓ ${configFiles.length} hook configs merged into ${GLOBAL_HOOKS_DIR} (global)`,
+				t.hookConfigsMerged(configFiles.length, GLOBAL_HOOKS_DIR),
 			),
 		);
 	} else {
 		console.warn(
-			c.yellow('  ⚠️  Warning: assets/hooks/ directory not found in package.'),
+			c.yellow(t.warnHooksNotFound),
 		);
 	}
 
 	// 2. Create project-level .snow/oms-state/ directory (for runtime state storage)
 	const stateDir = join(process.cwd(), '.snow', 'oms-state');
 	mkdirSync(stateDir, {recursive: true});
-	console.log(c.green(`  ✓ State directory created at ${stateDir}`));
+	console.log(c.green(t.stateDirCreated(stateDir)));
 }
 
 // ── Uninstall: MCP server config ──
@@ -389,7 +422,7 @@ function setupHooks(packageDir: string): void {
 function uninstallMcpConfig(): void {
 	if (!existsSync(SETTINGS_PATH)) {
 		console.log(
-			c.dim('  • settings.json not found, skipping MCP config removal.'),
+			c.dim(t.mcpNotFound),
 		);
 		return;
 	}
@@ -400,9 +433,9 @@ function uninstallMcpConfig(): void {
 	if (mcpServers && 'oms' in mcpServers) {
 		delete mcpServers['oms'];
 		writeJson(SETTINGS_PATH, settings);
-		console.log(c.green(`  ✓ Removed oms from ${SETTINGS_PATH}`));
+		console.log(c.green(t.mcpRemoved(SETTINGS_PATH)));
 	} else {
-		console.log(c.dim('  • oms not found in settings.json, skipping.'));
+		console.log(c.dim(t.mcpNotFound));
 	}
 }
 
@@ -411,7 +444,7 @@ function uninstallMcpConfig(): void {
 function uninstallSubAgents(): void {
 	if (!existsSync(SUB_AGENTS_PATH)) {
 		console.log(
-			c.dim('  • sub-agents.json not found, skipping agent removal.'),
+			c.dim(t.agentsNotFound),
 		);
 		return;
 	}
@@ -429,10 +462,10 @@ function uninstallSubAgents(): void {
 		writeJson(SUB_AGENTS_PATH, {agents: remaining});
 		const removed = existingAgents.length - remaining.length;
 		console.log(
-			c.green(`  ✓ Removed ${removed} OMS agents from ${SUB_AGENTS_PATH}`),
+			c.green(t.agentsRemoved(removed, SUB_AGENTS_PATH)),
 		);
 	} else {
-		console.log(c.dim('  • No OMS agents found in sub-agents.json, skipping.'));
+		console.log(c.dim(t.agentsNotFound));
 	}
 }
 
@@ -441,9 +474,9 @@ function uninstallSubAgents(): void {
 function uninstallSkills(): void {
 	if (existsSync(SKILLS_TARGET)) {
 		rmSync(SKILLS_TARGET, {recursive: true, force: true});
-		console.log(c.green(`  ✓ Removed ${SKILLS_TARGET}`));
+		console.log(c.green(t.skillsDirRemoved(SKILLS_TARGET)));
 	} else {
-		console.log(c.dim('  • skills/oms/ directory not found, skipping.'));
+		console.log(c.dim(t.skillsDirNotFound));
 	}
 }
 
@@ -452,9 +485,9 @@ function uninstallSkills(): void {
 function uninstallCommands(): void {
 	if (existsSync(COMMANDS_TARGET)) {
 		rmSync(COMMANDS_TARGET, {recursive: true, force: true});
-		console.log(c.green(`  ✓ Removed ${COMMANDS_TARGET}`));
+		console.log(c.green(t.commandsDirRemoved(COMMANDS_TARGET)));
 	} else {
-		console.log(c.dim('  • commands/oms/ directory not found, skipping.'));
+		console.log(c.dim(t.commandsDirNotFound));
 	}
 }
 
@@ -494,21 +527,21 @@ function uninstallHooks(): void {
 			if (removedConfigs > 0) {
 				console.log(
 					c.green(
-						`  ✓ Removed OMS hook rules from ${removedConfigs} config file(s) in ${GLOBAL_HOOKS_DIR}`,
+						t.hookRulesRemoved(removedConfigs, GLOBAL_HOOKS_DIR),
 					),
 				);
 			} else {
 				console.log(
-					c.dim('  • No OMS hook rules found in ~/.snow/hooks/, skipping.'),
+					c.dim(t.hookRulesNotFound),
 				);
 			}
 		} catch {
-			console.warn(c.yellow('  ⚠️  Could not read hook config directory.'));
+			console.warn(c.yellow(t.hookDirReadFail));
 		}
 	} else {
 		console.log(
 			c.dim(
-				'  • ~/.snow/hooks/ directory not found, skipping hook config removal.',
+				t.hookDirNotFound,
 			),
 		);
 	}
@@ -517,9 +550,9 @@ function uninstallHooks(): void {
 	const stateDir = join(process.cwd(), '.snow', 'oms-state');
 	if (existsSync(stateDir)) {
 		rmSync(stateDir, {recursive: true, force: true});
-		console.log(c.green(`  ✓ Removed ${stateDir}`));
+		console.log(c.green(t.stateDirRemoved(stateDir)));
 	} else {
-		console.log(c.dim('  • .snow/oms-state/ directory not found, skipping.'));
+		console.log(c.dim(t.stateDirNotFound));
 	}
 }
 
@@ -530,7 +563,7 @@ function setup(): void {
 		c.bold(c.cyan('\n╔══════════════════════════════════════════════════╗')),
 	);
 	console.log(
-		c.bold(c.cyan('║        Oh-My-Snow (OMS) — Setup                  ║')),
+		c.bold(c.cyan(`║        ${padDisplay(t.setupBanner, 48)}║`)),
 	);
 	console.log(
 		c.bold(c.cyan('╚══════════════════════════════════════════════════╝\n')),
@@ -540,7 +573,7 @@ function setup(): void {
 	let packageDir: string;
 	try {
 		packageDir = findPackageDir();
-		console.log(c.dim(`  Package: ${packageDir}`));
+		console.log(c.dim(`  ${t.packageLabel} ${packageDir}`));
 	} catch (error) {
 		console.error(c.red(`\n✖ ${(error as Error).message}\n`));
 		process.exit(1);
@@ -549,7 +582,7 @@ function setup(): void {
 	// Ensure ~/.snow/ exists
 	mkdirSync(SNOW_DIR, {recursive: true});
 
-	console.log('\n  Setting up OMS components...\n');
+	console.log(`\n  ${t.setupProgress}\n`);
 
 	// 1. MCP server config
 	setupMcpConfig(packageDir);
@@ -567,13 +600,11 @@ function setup(): void {
 	setupHooks(packageDir);
 
 	console.log(c.green('\n  ═══════════════════════════════════════════════'));
-	console.log(c.green('  ✅ OMS setup complete!\n'));
-	console.log(c.cyan('  Next steps:'));
-	console.log(
-		'    1. Restart Snow CLI to load the new MCP server and global hooks',
-	);
-	console.log('    2. Run /oms:help to see all available commands');
-	console.log('    3. Start with: /oms:auto "your goal here"\n');
+	console.log(c.green(`  ${t.setupComplete}\n`));
+	console.log(c.cyan(`  ${t.setupNextSteps}`));
+	console.log(`    ${t.setupNextRestart}`);
+	console.log(`    ${t.setupNextHelp}`);
+	console.log(`    ${t.setupNextAuto}\n`);
 }
 
 function uninstall(): void {
@@ -581,13 +612,13 @@ function uninstall(): void {
 		c.bold(c.yellow('\n╔══════════════════════════════════════════════════╗')),
 	);
 	console.log(
-		c.bold(c.yellow('║        Oh-My-Snow (OMS) — Uninstall              ║')),
+		c.bold(c.yellow(`║        ${padDisplay(t.uninstallBanner, 48)}║`)),
 	);
 	console.log(
 		c.bold(c.yellow('╚══════════════════════════════════════════════════╝\n')),
 	);
 
-	console.log('  Removing OMS components...\n');
+	console.log(`  ${t.uninstallProgress}\n`);
 
 	// 1. MCP server config
 	uninstallMcpConfig();
@@ -605,56 +636,39 @@ function uninstall(): void {
 	uninstallHooks();
 
 	console.log(c.green('\n  ═══════════════════════════════════════════════'));
-	console.log(c.green('  ✅ OMS uninstall complete!\n'));
-	console.log(c.cyan('  OMS has been fully removed from this project.'));
-	console.log(c.dim('  Restart Snow CLI to apply the changes.\n'));
+	console.log(c.green(`  ${t.uninstallComplete}\n`));
+	console.log(c.cyan(`  ${t.uninstallRemoved}`));
+	console.log(c.dim(`  ${t.uninstallRestart}\n`));
 }
 
 function help(): void {
 	console.log(`
-${c.bold(
-	c.cyan('Oh-My-Snow (OMS)'),
-)} — Autonomous orchestration plugin for Snow CLI
+${c.bold(c.cyan(t.helpTitle))}
 
-${c.bold('Usage:')}
-  ${c.cyan('oms')} <command>
+${c.bold(t.helpUsage)}
+  ${t.helpUsageCommand}
 
-${c.bold('Commands:')}
-  ${c.green(
-		'setup',
-	)}      Install OMS — register MCP server, agents, skills, commands, and hooks
-  ${c.green(
-		'uninstall',
-	)} Remove OMS — clean up all OMS components from system and project
-  ${c.green('help')}       Show this help message
+${c.bold(t.helpCommands)}
+  ${c.green('setup')}      ${t.helpCmdSetup}
+  ${c.green('uninstall')}  ${t.helpCmdUninstall}
+  ${c.green('help')}       ${t.helpCmdHelp}
 
-${c.bold('Setup details:')}
-  • Registers MCP server in ~/.snow/settings.json
-  • Merges 18 sub-agents into ~/.snow/sub-agents.json
-  • Copies 10 skills to ~/.snow/skills/oms/
-  • Copies 20 commands to ~/.snow/commands/oms/ (10 workflow + 10 skill mappings)
-  • Installs 4 hook configs to ~/.snow/hooks/ (global, with absolute path commands)
-  • Creates <project>/.snow/oms-state/ for session state (auto-created per project at runtime)
+${c.bold(t.helpSetupDetails)}
+  ${t.helpSetupDetailItems}
 
-${c.bold('Uninstall details:')}
-  • Removes MCP server from settings.json
-  • Removes all oms_* agents from sub-agents.json
-  • Removes ~/.snow/skills/oms/ directory
-  • Removes ~/.snow/commands/oms/ directory
-  • Removes OMS hook rules from ~/.snow/hooks/*.json (global)
-  • Removes <project>/.snow/oms-state/ directory
+${c.bold(t.helpUninstallDetails)}
+  ${t.helpUninstallDetailItems}
 
-${c.bold('After setup, use in Snow CLI:')}
-  /oms:auto "your goal"     — Start autonomous orchestration
-  /oms:plan "your goal"     — Iterative planning with consensus
-  /oms:help                 — Full usage guide with all features
+${c.bold(t.helpAfterSetup)}
+  ${t.helpAfterSetupItems}
 
-${c.bold('Prerequisites:')}
+${c.bold(t.helpPrerequisites)}
   • Snow CLI installed and configured
-  • Node.js 18+ 
+  • Node.js 18+
   • npm (for global installation)
 `);
 }
+
 
 // ── CLI entry point ──
 
@@ -676,7 +690,7 @@ switch (command) {
 		help();
 		break;
 	default:
-		console.error(c.red(`\n✖ Unknown command: ${command}\n`));
+		console.error(c.red(`\n✖ ${t.errUnknownCommand(command)}\n`));
 		help();
 		process.exit(1);
 }

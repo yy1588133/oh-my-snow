@@ -31,6 +31,20 @@ import {
 	listSnapshots,
 	deleteState,
 	saveVerifyCommandFile,
+	initPrd,
+	loadPrd,
+	refinePrd,
+	addPrdStory,
+	getNextPrdStory,
+	getPrdStory,
+	setPrdStoryPasses,
+	setCriterionVerified,
+	getPrdStatus,
+	initProgress,
+	logProgress,
+	readProgress,
+	deletePrd,
+	type RefinedStoryInput,
 } from './state/store.js';
 import {writeFileSync, mkdirSync} from 'fs';
 import {join} from 'path';
@@ -582,7 +596,7 @@ server.registerTool(
 				.number()
 				.optional()
 				.describe(
-					'Maximum evolution iterations (default 2, hard max 5). Each iteration runs EmbodiSkill → SkillEvolver → darwin-skill.',
+					'Maximum evolution iterations (default 2, hard max 5). Each iteration runs reflect → explore → evaluate (inlined in the learn skill).',
 				),
 		},
 	},
@@ -749,34 +763,531 @@ ${patternsArr
 							`  Patterns: ${patternsArr.length}\n` +
 							`  Max iterations: ${maxIter}\n\n` +
 							`## Skill Evolution Pipeline\n\n` +
-							`The initial draft has been saved. Now execute the evolution cycle:\n\n` +
-							`### Iteration 1/${maxIter}\n\n` +
-							`**Step 1: EmbodiSkill — Skill-Aware Reflection**\n` +
-							`- Load the skill: \`/skill embodi-skill\`\n` +
-							`- Analyze the current draft against the session trajectory\n` +
-							`- Input: The draft at ${skillDir}/SKILL.md + session data (stageHistory, logs, tasks)\n` +
-							`- Output: A JSON array of revision signals (DISCOVERY, OPTIMIZATION, SKILL_DEFECT, EXECUTION_LAPSE)\n\n` +
-							`**Step 2: SkillEvolver — Strategy Exploration**\n` +
-							`- Load the skill: \`/skill skill-evolver\`\n` +
-							`- For each revision signal, generate K=4 distinct strategies (max 8 total candidates)\n` +
-							`- Deploy and test each candidate, then audit for overfitting\n` +
-							`- Select the best candidate\n\n` +
-							`**Step 3: Darwin-Skill — Evaluation & Ratchet**\n` +
-							`- Load the skill: \`/skill darwin-skill\`\n` +
-							`- Score the candidate across 9 dimensions (total 100 points)\n` +
-							`- Apply ratchet: if score > baseline → KEEP, else → REVERT\n` +
-							`- **Present the score breakdown and diff to the user** — wait for their confirmation before continuing\n\n` +
-							`### Convergence Check\n` +
-							`- If EmbodiSkill returns 0 revision signals AND darwin-skill score ≥ 80 → converged, save final skill\n` +
-							`- If this is the last iteration (iteration ${maxIter}/${maxIter}) → save current best result\n` +
-							`- Otherwise → proceed to Iteration 2/${maxIter} (return to Step 1)\n\n` +
-							`**Important:**\n` +
-							`- You are performing iteration 1 of ${maxIter}. Include this count in your progress updates.\n` +
-							`- If this is the last iteration, save the current best result as the final skill.\n` +
-							`- After each darwin-skill evaluation, pause and ask the user: "Do you want to keep this version?" before proceeding.`,
+							`The initial draft has been saved. Now execute the evolution cycle per **Phase 4 of the learn SKILL.md** (already loaded in your context). The SKILL.md is the single source of truth for the full reflect → explore → evaluate methodology, the 9 dimension rubric, the K=4 strategy exploration, the independent-agent discipline, and the ratchet mechanism — do NOT re-derive or re-state those rules here, and do NOT load any external skills.\n\n` +
+							`This tool only provides the dynamic state you can't get from the SKILL.md:\n\n` +
+							`### Iteration 1/${maxIter}\n` +
+							`- Draft to evolve: ${skillDir}/SKILL.md\n` +
+							`- Step 1 input: the draft above + session trajectory (stageHistory, logs, tasks from state.json)\n` +
+							`- Ratchet baseline file: ${skillDir}/.evolution.json (create on first Step 3; read it at the start of every Step 3 so a fresh Agent C knows the prior baseline)\n\n` +
+							`### Reminders (full detail in SKILL.md Phase 4)\n` +
+							`- Reflect → Explore → Evaluate, each in a separate sub-agent context.\n` +
+							`- Convergence: 0 revision signals AND score ≥ 80 AND no DISCOVERY/SKILL_DEFECT.\n` +
+							`- After each Step 3 evaluation, pause and ask the user: "Do you want to keep this version?" before proceeding.\n` +
+							`- On the last iteration (${maxIter}/${maxIter}), save the current best result as the final skill.\n` +
+							`- Include this iteration count (1/${maxIter}) in your progress updates.`,
 					},
 				],
 			};
+		} catch (error) {
+			return {
+				content: [
+					{type: 'text' as const, text: `Error: ${(error as Error).message}`},
+				],
+				isError: true,
+			};
+		}
+	},
+);
+
+// ── Tool: oms-prd ──
+//
+// PRD (Product Requirements Document) management for the Ralph persistence
+// loop. Ralph iterates story-by-story until every story has passes:true and
+// is reviewer-verified. This tool exposes PRD CRUD operations to the AI.
+//
+// Actions:
+//   init          — create scaffold prd.json from a task description
+//   refine        — replace scaffold stories with task-specific refined stories
+//   add-story      — add a new story discovered during implementation
+//   next-story     — get the highest-priority story with passes:false
+//   get-story      — read a story's full details + acceptance criteria
+//   mark-passes    — set a story's passes flag (true requires all criteria verified)
+//   unmark-passes  — revert passes to false (on reviewer rejection)
+//   verify-criterion — mark a single acceptance criterion as verified/unverified
+//   status        — get PRD completion summary
+//   init-progress — initialize progress.txt
+//   log-progress  — append a learning entry to progress.txt
+//   list          — list all stories with their passes status
+
+server.registerTool(
+	'oms-prd',
+	{
+		description:
+			'Manage the Ralph PRD (Product Requirements Document) — create, refine, query, and update user stories and their acceptance criteria. Drives the Ralph persistence loop: stories iterate until every one has passes:true and is reviewer-verified.',
+		inputSchema: {
+			action: z
+				.enum([
+					'init',
+					'refine',
+					'add-story',
+					'next-story',
+					'get-story',
+					'mark-passes',
+					'unmark-passes',
+					'verify-criterion',
+					'status',
+					'init-progress',
+					'log-progress',
+					'list',
+				])
+				.describe('The PRD action to perform'),
+			task: z
+				.string()
+				.optional()
+				.describe(
+					'The task description (required for "init" and "refine")',
+				),
+			stories: z
+				.array(
+					z.object({
+						title: z.string(),
+						acceptanceCriteria: z.array(z.string()),
+						priority: z.number(),
+					}),
+				)
+				.optional()
+				.describe(
+					'Refined stories (required for "refine"). Each has title, acceptance criteria texts, and priority.',
+				),
+			title: z
+				.string()
+				.optional()
+				.describe('Story title (required for "add-story")'),
+			acceptanceCriteria: z
+				.array(z.string())
+				.optional()
+				.describe(
+					'Acceptance criteria texts (required for "add-story")',
+				),
+			priority: z
+				.number()
+				.optional()
+				.describe('Story priority, lower = higher (for "add-story")'),
+			storyId: z
+				.string()
+				.optional()
+				.describe('Story id, e.g. "US-001" (for get-story / mark-passes / unmark-passes / verify-criterion)'),
+			criterionIndex: z
+				.number()
+				.optional()
+				.describe(
+					'Acceptance criterion index (0-based) — required for "verify-criterion"',
+				),
+			verified: z
+				.boolean()
+				.optional()
+				.describe(
+					'Verified flag — required for "verify-criterion"',
+				),
+			message: z
+				.string()
+				.optional()
+				.describe('Progress entry text — required for "log-progress"'),
+		},
+	},
+	params => {
+		try {
+			switch (params.action) {
+				case 'init': {
+					if (!params.task) {
+						return {
+							content: [
+								{
+									type: 'text' as const,
+									text: 'Error: "task" is required for the "init" action.',
+								},
+							],
+							isError: true,
+						};
+					}
+					const existing = loadPrd();
+					if (existing) {
+						return {
+							content: [
+								{
+									type: 'text' as const,
+									text: `⚠️ A PRD already exists (task: "${existing.task}", refined: ${existing.refined}).\n\nIf you want to start fresh, call oms-stop first to clear state, or use "refine" to replace the stories.`,
+								},
+							],
+							isError: true,
+						};
+					}
+					const prd = initPrd(params.task);
+					return {
+						content: [
+							{
+								type: 'text' as const,
+								text:
+									`✅ PRD scaffold created.\n\n` +
+									`Task: ${prd.task}\n` +
+									`Stories: ${prd.stories.length} (scaffold)\n\n` +
+									`⚠️ CRITICAL: The scaffold has generic acceptance criteria.\n` +
+									`You MUST refine it with task-specific stories by calling oms-prd with action: "refine"\n` +
+									`before entering the persistence loop.\n\n` +
+									`Scaffold story:\n` +
+									prd.stories
+										.map(
+											s =>
+												`  ${s.id}: ${s.title} (priority ${s.priority})`,
+										)
+										.join('\n'),
+							},
+						],
+					};
+				}
+
+				case 'refine': {
+					if (!params.stories || params.stories.length === 0) {
+						return {
+							content: [
+								{
+									type: 'text' as const,
+									text: 'Error: "stories" array is required for the "refine" action.',
+								},
+							],
+							isError: true,
+						};
+					}
+					const prd = refinePrd(
+						params.task || '',
+						params.stories as RefinedStoryInput[],
+					);
+					return {
+						content: [
+							{
+								type: 'text' as const,
+								text:
+									`✅ PRD refined with ${prd.stories.length} task-specific stories.\n\n` +
+									`Task: ${prd.task}\n\n` +
+									`Stories (priority order):\n` +
+									prd.stories
+										.sort((a, b) => a.priority - b.priority)
+										.map(
+											s =>
+												`  ${s.id} [P${s.priority}]: ${s.title}\n` +
+												`    Criteria: ${s.acceptanceCriteria.length}`,
+										)
+										.join('\n') +
+									`\n\nPRD is ready for the persistence loop. Call oms-prd with action: "next-story" to begin.`,
+							},
+						],
+					};
+				}
+
+				case 'add-story': {
+					if (!params.title || !params.acceptanceCriteria) {
+						return {
+							content: [
+								{
+									type: 'text' as const,
+									text: 'Error: "title" and "acceptanceCriteria" are required for the "add-story" action.',
+								},
+							],
+							isError: true,
+						};
+					}
+					const story = addPrdStory(
+						params.title,
+						params.acceptanceCriteria,
+						params.priority ?? 99,
+					);
+					if (!story) {
+						return {
+							content: [
+								{
+									type: 'text' as const,
+									text: 'Error: No active PRD. Call oms-prd with action: "init" first.',
+								},
+							],
+							isError: true,
+						};
+					}
+					return {
+						content: [
+							{
+								type: 'text' as const,
+								text: `✅ Story added: ${story.id}: ${story.title} (priority ${story.priority}, ${story.acceptanceCriteria.length} criteria)`,
+							},
+						],
+					};
+				}
+
+				case 'next-story': {
+					const story = getNextPrdStory();
+					if (!story) {
+						const status = getPrdStatus();
+						return {
+							content: [
+								{
+									type: 'text' as const,
+									text: status
+										? `✅ All stories complete (${status.passed}/${status.total}). Proceed to reviewer verification.`
+										: 'No active PRD. Call oms-prd with action: "init" first.',
+								},
+							],
+							isError: !status,
+						};
+					}
+					return {
+						content: [
+							{
+								type: 'text' as const,
+								text:
+									`Next story to work on:\n\n` +
+									`  ID: ${story.id}\n` +
+									`  Title: ${story.title}\n` +
+									`  Priority: ${story.priority}\n` +
+									`  Passes: ${story.passes}\n\n` +
+									`Acceptance criteria:\n` +
+									story.acceptanceCriteria
+										.map(
+											(c, i) =>
+												`  [${c.verified ? '✓' : '○'}] ${i}: ${c.criterion}`,
+										)
+										.join('\n'),
+							},
+						],
+					};
+				}
+
+				case 'get-story': {
+					if (!params.storyId) {
+						return {
+							content: [
+								{
+									type: 'text' as const,
+									text: 'Error: "storyId" is required for the "get-story" action.',
+								},
+							],
+							isError: true,
+						};
+					}
+					const story = getPrdStory(params.storyId);
+					if (!story) {
+						return {
+							content: [
+								{
+									type: 'text' as const,
+									text: `Error: No story found with id "${params.storyId}".`,
+								},
+							],
+							isError: true,
+						};
+					}
+					return {
+						content: [
+							{
+								type: 'text' as const,
+								text:
+									`Story: ${story.id}\n` +
+									`Title: ${story.title}\n` +
+									`Priority: ${story.priority}\n` +
+									`Passes: ${story.passes}\n\n` +
+									`Acceptance criteria:\n` +
+									story.acceptanceCriteria
+										.map(
+											(c, i) =>
+												`  [${c.verified ? '✓' : '○'}] ${i}: ${c.criterion}`,
+										)
+										.join('\n'),
+							},
+						],
+					};
+				}
+
+				case 'mark-passes':
+				case 'unmark-passes': {
+					if (!params.storyId) {
+						return {
+							content: [
+								{
+									type: 'text' as const,
+									text: 'Error: "storyId" is required.',
+								},
+							],
+							isError: true,
+						};
+					}
+					const passes = params.action === 'mark-passes';
+					const story = setPrdStoryPasses(params.storyId, passes);
+					if (!story) {
+						return {
+							content: [
+								{
+									type: 'text' as const,
+									text: `Error: No story found with id "${params.storyId}".`,
+								},
+							],
+							isError: true,
+						};
+					}
+					return {
+						content: [
+							{
+								type: 'text' as const,
+								text: `✅ Story ${story.id} passes set to ${story.passes}.`,
+							},
+						],
+					};
+				}
+
+				case 'verify-criterion': {
+					if (
+						!params.storyId ||
+						params.criterionIndex === undefined ||
+						params.verified === undefined
+					) {
+						return {
+							content: [
+								{
+									type: 'text' as const,
+									text: 'Error: "storyId", "criterionIndex", and "verified" are required for the "verify-criterion" action.',
+								},
+							],
+							isError: true,
+						};
+					}
+					const story = setCriterionVerified(
+						params.storyId,
+						params.criterionIndex,
+						params.verified,
+					);
+					if (!story) {
+						return {
+							content: [
+								{
+									type: 'text' as const,
+									text: `Error: No story found with id "${params.storyId}" or invalid criterion index.`,
+								},
+							],
+							isError: true,
+						};
+					}
+					return {
+						content: [
+							{
+								type: 'text' as const,
+								text:
+									`✅ Criterion ${params.criterionIndex} of ${story.id} verified=${params.verified}.\n` +
+									`Story passes (auto): ${story.passes} (all criteria verified = true)`,
+							},
+						],
+					};
+				}
+
+				case 'status': {
+					const status = getPrdStatus();
+					if (!status) {
+						return {
+							content: [
+								{
+									type: 'text' as const,
+									text: 'No active PRD. Call oms-prd with action: "init" first.',
+								},
+							],
+							isError: true,
+						};
+					}
+					return {
+						content: [
+							{
+								type: 'text' as const,
+								text:
+									`PRD Status\n` +
+									`────────────────────────────\n` +
+									`Task: ${status.task}\n` +
+									`Refined: ${status.refined}\n` +
+									`Stories: ${status.passed}/${status.total} passed (${status.remaining} remaining)\n\n` +
+									`Stories (priority order):\n` +
+									status.stories
+										.map(
+											s =>
+												`  [${s.passes ? '✓' : '○'}] ${s.id} [P${s.priority}]: ${s.title}`,
+										)
+										.join('\n'),
+							},
+						],
+					};
+				}
+
+				case 'init-progress': {
+					const created = initProgress();
+					return {
+						content: [
+							{
+								type: 'text' as const,
+								text: created
+									? '✅ progress.txt initialized.'
+									: '• progress.txt already exists.',
+							},
+						],
+					};
+				}
+
+				case 'log-progress': {
+					if (!params.message) {
+						return {
+							content: [
+								{
+									type: 'text' as const,
+									text: 'Error: "message" is required for the "log-progress" action.',
+								},
+							],
+							isError: true,
+						};
+					}
+					logProgress(params.message);
+					return {
+						content: [
+							{
+								type: 'text' as const,
+								text: '✅ Progress logged.',
+							},
+						],
+					};
+				}
+
+				case 'list': {
+					const status = getPrdStatus();
+					if (!status) {
+						return {
+							content: [
+								{
+									type: 'text' as const,
+									text: 'No active PRD. Call oms-prd with action: "init" first.',
+								},
+							],
+							isError: true,
+						};
+					}
+					return {
+						content: [
+							{
+								type: 'text' as const,
+								text:
+									`PRD Stories (${status.passed}/${status.total} passed):\n` +
+									status.stories
+										.map(
+											s =>
+												`  [${s.passes ? '✓' : '○'}] ${s.id} [P${s.priority}]: ${s.title}`,
+										)
+										.join('\n'),
+							},
+						],
+					};
+				}
+
+				default:
+					return {
+						content: [
+							{
+								type: 'text' as const,
+								text: `Unknown action: ${params.action}`,
+							},
+						],
+						isError: true,
+					};
+			}
 		} catch (error) {
 			return {
 				content: [
@@ -818,6 +1329,9 @@ server.registerTool(
 				state.tasks.length
 			} completed. Turns: ${state.turnCount}.`;
 			deleteState();
+			// Also clean up Ralph PRD files (prd.json + progress.txt) if present.
+			// Safe no-op if Ralph was never used.
+			deletePrd();
 			return {
 				content: [
 					{
