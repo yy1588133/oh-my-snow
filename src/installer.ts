@@ -53,6 +53,17 @@ const SKILLS_TARGET = join(SNOW_DIR, 'skills', 'oms');
 const COMMANDS_TARGET = join(SNOW_DIR, 'commands', 'oms');
 const GLOBAL_HOOKS_DIR = join(SNOW_DIR, 'hooks');
 
+// Banner box geometry. The top/bottom borders are `╔` + N×`═` + `╗`; the
+// content row is `║` + BANNER_INDENT spaces + padDisplay(text, W) + `║`.
+// For the right `║` to land at the same column as the borders, the content
+// region must equal the border's `═` count, so W = BANNER_INNER_WIDTH where
+// BANNER_INNER_WIDTH = BANNER_BORDER_WIDTH − BANNER_INDENT.
+// Keep these in sync with the `╔══...══╗` literals in setup()/uninstall()
+// (the `═` count there must equal BANNER_BORDER_WIDTH).
+const BANNER_BORDER_WIDTH = 50; // count of `═` in the top/bottom border
+const BANNER_INDENT = 8; // spaces between `║` and the padded text
+const BANNER_INNER_WIDTH = BANNER_BORDER_WIDTH - BANNER_INDENT; // = 42
+
 const OMS_HOOK_DESCRIPTION_PREFIX = 'OMS:';
 
 // i18n — read once at startup. Language follows snow-cli's ~/.snow/language.json.
@@ -71,9 +82,12 @@ const c = {
 
 /**
  * Pad a string to a target DISPLAY width (not char count).
- * CJK characters take 2 display columns; padEnd(48) counts them as 1, which
+ * CJK characters take 2 display columns; padEnd(42) counts them as 1, which
  * breaks the right border ║ of the setup/uninstall banner for zh/zh-TW.
  * This measures display width and pads with spaces accordingly.
+ *
+ * Callers pass BANNER_INNER_WIDTH (= BANNER_BORDER_WIDTH − BANNER_INDENT, see
+ * constants above) so the right `║` lands at the same column as the borders.
  */
 function padDisplay(str: string, width: number): string {
 	let displayWidth = 0;
@@ -563,7 +577,7 @@ function setup(): void {
 		c.bold(c.cyan('\n╔══════════════════════════════════════════════════╗')),
 	);
 	console.log(
-		c.bold(c.cyan(`║        ${padDisplay(t.setupBanner, 48)}║`)),
+		c.bold(c.cyan(`║        ${padDisplay(t.setupBanner, BANNER_INNER_WIDTH)}║`)),
 	);
 	console.log(
 		c.bold(c.cyan('╚══════════════════════════════════════════════════╝\n')),
@@ -612,7 +626,7 @@ function uninstall(): void {
 		c.bold(c.yellow('\n╔══════════════════════════════════════════════════╗')),
 	);
 	console.log(
-		c.bold(c.yellow(`║        ${padDisplay(t.uninstallBanner, 48)}║`)),
+		c.bold(c.yellow(`║        ${padDisplay(t.uninstallBanner, BANNER_INNER_WIDTH)}║`)),
 	);
 	console.log(
 		c.bold(c.yellow('╚══════════════════════════════════════════════════╝\n')),

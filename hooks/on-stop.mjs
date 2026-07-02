@@ -28,15 +28,50 @@ import { getStateDir, loadState, saveState, detectVerifyCommand, readStdin, appe
 // AI knows which story to work on next. All mutations happen via the oms-prd
 // MCP tool (backed by store.ts). This reads prd.json directly to avoid a
 // runtime dependency on the compiled store.js (hooks are plain .mjs scripts).
+//
+// Atomicity note: store.ts writes prd.json via tmp+rename, which IS atomic on
+// the normal path — a reader sees either the old file or the new file, never a
+// partial one. The ONLY non-atomic path is the cross-device fallback in
+// tmpRenameWrite (renameSync throws EXDEV → direct writeFileSync), where a
+// reader can catch a half-written file. We retry once after a short sleep to
+// ride out that window. We do NOT retry on ENOENT (file deleted — not
+// transient) — only on SyntaxError (partial/corrupt JSON).
+
+function syncSleep(ms) {
+	// Non-blocking sleep via Atomics.wait when SharedArrayBuffer is available;
+	// falls back to a Date.now() spin (same primitive store.ts uses). This is a
+	// sync hook, so blocking the event loop for ~20ms is acceptable, but
+	// Atomics.wait yields the thread instead of burning CPU.
+	try {
+		Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+	} catch {
+		const start = Date.now();
+		while (Date.now() - start < ms) { /* spin fallback */ }
+	}
+}
 
 function loadPrd() {
 	const prdPath = join(getStateDir(), 'prd.json');
 	if (!existsSync(prdPath)) return null;
-	try {
-		return JSON.parse(readFileSync(prdPath, 'utf-8'));
-	} catch {
-		return null;
+	for (let attempt = 0; attempt < 2; attempt++) {
+		try {
+			return JSON.parse(readFileSync(prdPath, 'utf-8'));
+		} catch (error) {
+			// ENOENT between the existsSync above and readFileSync means the
+			// file was deleted mid-read (e.g. deletePrd during oms-stop) — not
+			// transient, don't retry, just return null.
+			if (error && error.code === 'ENOENT') {
+				return null;
+			}
+			// SyntaxError (partial JSON from cross-device fallback) or other
+			// transient read error — retry once after a short sleep before
+			// giving up and dropping Ralph context from the continuation prompt.
+			if (attempt === 0) {
+				syncSleep(20);
+			}
+		}
 	}
+	return null;
 }
 
 function buildPrdSection(prd) {

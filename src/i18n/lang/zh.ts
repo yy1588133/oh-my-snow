@@ -50,7 +50,7 @@ export const zh: TranslationKeys = {
 			'• 在 ~/.snow/settings.json 注册 MCP 服务器\n' +
 			'• 将 18 个子代理合并到 ~/.snow/sub-agents.json\n' +
 			'• 复制 9 个技能到 ~/.snow/skills/oms/\n' +
-			'• 复制 17 个命令到 ~/.snow/commands/oms/(10 个工作流 + 7 个技能映射)\n' +
+			'• 复制 18 个命令到 ~/.snow/commands/oms/(11 个工作流 + 7 个技能映射)\n' +
 			'• 安装 4 个钩子配置到 ~/.snow/hooks/(全局,使用绝对路径命令)\n' +
 			'• 创建 <项目>/.snow/oms-state/ 用于存储会话状态(运行时按项目自动创建)',
 		helpUninstallDetailItems:

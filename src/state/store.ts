@@ -153,8 +153,9 @@ function syncSleep(ms: number): void {
  *
  * Behavior on lock contention (after MAX_RETRIES):
  *   - onContention = 'skip'   → return false, no write (state.json — never corrupt)
- *   - onContention = 'force'  → direct writeFileSync fallback (prd.json — better to lose
- *                                an update than silently drop it during a Ralph loop)
+ *   - onContention = 'force'  → tmp+rename anyway (prd.json — better to force the
+ *                                update through than silently drop it during a Ralph
+ *                                loop; tmp+rename keeps atomicity so no torn file)
  *
  * @returns true if the write succeeded (lock acquired + renamed, or forced write OK)
  */
@@ -173,11 +174,15 @@ function atomicWriteWithLock(
 	}
 	const lockPath = filePath + '.lock';
 
-	// Stale lock detection: force-remove locks older than 120s
+	// Stale lock detection: force-remove locks older than STALE_LOCK_MS.
+	// 120s is intentionally generous — savePrd on a large state.json + slow disk
+	// can take seconds, and force-removing a still-live lock would break mutual
+	// exclusion. Only locks held far past any legitimate write are reaped.
+	const STALE_LOCK_MS = 120000;
 	if (existsSync(lockPath)) {
 		try {
 			const lockStat = statSync(lockPath);
-			if (Date.now() - lockStat.mtimeMs > 120000) {
+			if (Date.now() - lockStat.mtimeMs > STALE_LOCK_MS) {
 				unlinkSync(lockPath);
 			}
 		} catch {}
@@ -202,13 +207,15 @@ function atomicWriteWithLock(
 
 	if (!lockCreated) {
 		if (onContention === 'force') {
-			// Fallback: direct write is better than losing the update (PRD loop)
-			try {
-				writeFileSync(filePath, content, 'utf-8');
-				return true;
-			} catch {
-				return false;
-			}
+			// Couldn't acquire the lock after retries, but prd.json MUST be written
+			// (a Ralph loop dropping a story update loses progress). Write without
+			// the lock — tmp+rename still keeps the FILE atomic (no torn read), we
+			// just lose cross-process serialization for this one write. The lock
+			// holder's write and this write race; last writer wins on rename, which
+			// is acceptable for the PRD (the losing state is recoverable via
+			// re-refine). This is strictly better than the old direct writeFileSync
+			// which could leave a half-written file and make loadPrd return null.
+			return tmpRenameWrite(filePath, content);
 		}
 		// onContention === 'skip': log and skip to avoid corrupting concurrent writes
 		try {
@@ -224,18 +231,9 @@ function atomicWriteWithLock(
 	}
 
 	try {
-		const tmpPath = filePath + '.tmp';
-		writeFileSync(tmpPath, content, 'utf-8');
-		try {
-			renameSync(tmpPath, filePath);
-		} catch {
-			// Cross-device fallback: direct write
-			writeFileSync(filePath, content, 'utf-8');
-			try {
-				unlinkSync(tmpPath);
-			} catch {}
-		}
-		return true;
+		// Single shared write path — same tmp+rename as the force fallback, so a
+		// bug in the rename/cross-device handling only needs fixing in ONE place.
+		return tmpRenameWrite(filePath, content);
 	} finally {
 		// Only delete the lock if THIS process created it.
 		// Deleting another process's lock breaks the mutual exclusion guarantee.
@@ -244,6 +242,57 @@ function atomicWriteWithLock(
 				unlinkSync(lockPath);
 			} catch {}
 		}
+	}
+}
+
+/**
+ * Write `content` to `filePath` atomically via tmp+rename.
+ *
+ * On a normal same-device rename this is fully atomic: a reader sees either the
+ * old file or the new file, never a partial write. If rename throws (typically
+ * EXDEV across filesystems), fall back to a direct writeFileSync — this loses
+ * atomicity for that one write, but is better than dropping the update entirely.
+ *
+ * `.tmp` cleanup is best-effort: it runs on the rename-success path (rename
+ * consumes the file) and in both error branches. If writeFileSync itself throws
+ * (disk full), the outer atomicWriteWithLock catch / caller handles the throw
+ * and deleteState()/deletePrd() sweep leftover .tmp files on the next cleanup.
+ * Returns false on any unrecoverable write failure.
+ */
+function tmpRenameWrite(filePath: string, content: string): boolean {
+	const tmpPath = filePath + '.tmp';
+	try {
+		writeFileSync(tmpPath, content, 'utf-8');
+	} catch {
+		// Could not even finish writing the tmp file (disk full, permissions).
+		// A partial .tmp may exist on disk — clean it up so it doesn't trip
+		// the next call, matching the cleanup in the rename-failure branch below.
+		try {
+			unlinkSync(tmpPath);
+		} catch {}
+		return false;
+	}
+	try {
+		renameSync(tmpPath, filePath);
+		return true;
+	} catch {
+		// Cross-device fallback: direct write as last resort. Not atomic, but
+		// preserves the data — the only non-atomic path in the whole write stack.
+		try {
+			writeFileSync(filePath, content, 'utf-8');
+		} catch {
+			// Both rename and direct write failed — make sure we don't leave a
+			// stale .tmp behind for the next call to trip over.
+			try {
+				unlinkSync(tmpPath);
+			} catch {}
+			return false;
+		}
+		// Direct write succeeded; clean up the now-orphaned tmp.
+		try {
+			unlinkSync(tmpPath);
+		} catch {}
+		return true;
 	}
 }
 
@@ -579,8 +628,25 @@ function savePrd(prd: Prd): void {
  * Create a scaffold PRD from a task description.
  * The scaffold has a single generic story — the caller MUST refine it
  * with task-specific acceptance criteria via refinePrd().
+ *
+ * Concurrency-safe init: uses the lock with 'skip' contention policy, NOT the
+ * 'force' policy that savePrd/refinePrd use. Two MCP sessions calling initPrd
+ * simultaneously race on lock acquisition; the loser SKIPS its scaffold write
+ * (rather than force-overwriting the winner's file) and re-reads to return the
+ * winner's PRD. This is the key difference from savePrd — init is "create if
+ * absent", and a force write here would clobber a PRD the winner already
+ * refined in the gap between our loadPrd() check and the write.
+ *
+ * The TOCTOU window between loadPrd() and the locked write is closed by the
+ * lock itself: the loser's 'skip' means it writes nothing, then re-reads the
+ * file the winner wrote under the lock. loadPrd() before the write is just an
+ * optimization to skip building the scaffold when a PRD already exists.
  */
 export function initPrd(task: string): Prd {
+	const existing = loadPrd();
+	if (existing) {
+		return existing;
+	}
 	const now = new Date().toISOString();
 	const prd: Prd = {
 		task,
@@ -604,7 +670,26 @@ export function initPrd(task: string): Prd {
 		createdAt: now,
 		updatedAt: now,
 	};
-	savePrd(prd);
+	// 'skip' on contention: if another process is mid-write (or already wrote),
+	// don't force-overwrite — re-read and return theirs. This is what makes
+	// init idempotent under concurrent init rather than last-writer-wins.
+	const wrote = atomicWriteWithLock(
+		getPrdFilePath(),
+		JSON.stringify(prd, null, 2),
+		'skip',
+	);
+	if (!wrote) {
+		// We lost the lock race — another session created the PRD. Return theirs
+		// instead of clobbering it with our scaffold.
+		const theirs = loadPrd();
+		if (theirs) {
+			return theirs;
+		}
+		// Truly lost the race AND no PRD on disk (the winner wrote then deleted?
+		// or we hit a transient lock failure). Fall back to a best-effort write
+		// so the caller still gets a PRD — better than returning an unsaved object.
+		atomicWriteWithLock(getPrdFilePath(), JSON.stringify(prd, null, 2), 'force');
+	}
 	return prd;
 }
 
@@ -729,6 +814,15 @@ export function getPrdStory(storyId: string): PrdStory | null {
  *
  * When setting passes:false (unmark, on reviewer rejection), criteria verified
  * flags are left as-is — the agent re-verifies them individually on the next pass.
+ *
+ * The guard is intentionally asymmetric — only passes:true is gated on every()
+ * being verified:
+ *   - mark-passes(true)  on an unverified story → REFUSED (null). Forces evidence.
+ *   - mark-passes(true)  on a fully-verified story → OK (idempotent).
+ *   - mark-passes(false) on any story → always OK (unmark needs no precondition;
+ *     reviewer can reject at will). After unmark, verified flags stay true so a
+ *     later mark-passes(true) re-passes without re-verifying — that's intended:
+ *     evidence doesn't vanish just because the story was sent back for rework.
  */
 export function setPrdStoryPasses(
 	storyId: string,
@@ -754,7 +848,34 @@ export function setPrdStoryPasses(
 	return story;
 }
 
-/** Mark a single acceptance criterion as verified/unverified. */
+/**
+ * Mark a single acceptance criterion as verified/unverified.
+ *
+ * Passes derivation rule (asymmetric by design):
+ *   - verify-criterion(idx, true)  → when the LAST criterion is verified, auto-lift
+ *     passes=true (convenience: no need for a separate mark-passes call once all
+ *     evidence is in). The mark-passes guard in setPrdStoryPasses is satisfied.
+ *   - verify-criterion(idx, false) → only clears that criterion's flag. It does
+ *     NOT auto-drop passes — unmarking a story is the caller's explicit job via
+ *     setPrdStoryPasses(id, false). This keeps responsibilities clean: this
+ *     function owns criterion flags, setPrdStoryPasses owns the passes flag.
+ *     Previously it set `passes = allVerified` on every call, which meant
+ *     flipping one criterion to false silently unmarked the whole story —
+ *     contradicting the setPrdStoryPasses JSDoc ("passes:false leaves verified
+ *     flags as-is for re-verification") and surprising the agent.
+ *
+ * Interaction with reviewer rejection (intended behavior):
+ *   After setPrdStoryPasses(id, false) rejects a story, the verified flags stay
+ *   true (evidence doesn't vanish). If the agent then calls verify-criterion on
+ *   ANY criterion with verified=true (e.g. re-confirming after a rework), the
+ *   `verified && every()` condition re-lifts passes=true WITHOUT an explicit
+ *   mark-passes(true). This is by design: a reviewer "打回" asks the agent to
+ *   redo + re-verify, not to invalidate evidence. Re-verifying IS the rework
+ *   confirmation, so the story legitimately re-passes. A reviewer who needs to
+ *   permanently block a story should delete it or rewrite its criteria rather
+ *   than rely on mark-passes(false) as a veto, since re-verification will lift
+ *   passes again once all criteria hold.
+ */
 export function setCriterionVerified(
 	storyId: string,
 	criterionIndex: number,
@@ -774,9 +895,11 @@ export function setCriterionVerified(
 	}
 	criterion.verified = verified;
 	story.updatedAt = new Date().toISOString();
-	// If all criteria verified, auto-set passes: true; if any unverified, passes: false
-	const allVerified = story.acceptanceCriteria.every(c => c.verified);
-	story.passes = allVerified;
+	// Only lift passes when all criteria are verified. Never drop passes here —
+	// dropping is setPrdStoryPasses(id, false)'s job (see JSDoc on this function).
+	if (verified && story.acceptanceCriteria.every(c => c.verified)) {
+		story.passes = true;
+	}
 	savePrd(prd);
 	return story;
 }
@@ -814,14 +937,21 @@ export function getPrdStatus(): {
 	};
 }
 
-/** Initialize progress.txt. Returns true if created, false if already exists. */
+/**
+ * Initialize progress.txt. Returns true if created, false if already exists.
+ *
+ * If no PRD exists yet (agent called init-progress before init), the header is
+ * written with an empty task rather than a misleading "(unknown)" literal —
+ * the next refinePrd deletes this file and rebuilds it with the real task.
+ */
 export function initProgress(): boolean {
 	const filePath = getProgressFilePath();
 	if (existsSync(filePath)) {
 		return false;
 	}
 	ensureStateDir();
-	const header = `# Ralph Progress Log\n# Task: ${loadPrd()?.task || '(unknown)'}\n# Created: ${new Date().toISOString()}\n\n`;
+	const task = loadPrd()?.task ?? '';
+	const header = `# Ralph Progress Log\n# Task: ${task}\n# Created: ${new Date().toISOString()}\n\n`;
 	writeFileSync(filePath, header, 'utf-8');
 	return true;
 }
@@ -831,6 +961,11 @@ export function initProgress(): boolean {
  * Self-healing: if the file doesn't exist yet (initProgress was skipped or the
  * process restarted), write the header first so logProgress never creates a
  * headerless file that would permanently confuse initProgress's existsSync check.
+ *
+ * The header write + entry append are not individually locked, but progress.txt
+ * is an append-only log — concurrent logProgress calls only risk interleaved
+ * entries, never a lost header (the self-heal writeFileSync is the first writer
+ * wins; the loser's appendFileSync still lands its entry after).
  */
 export function logProgress(message: string): void {
 	const filePath = getProgressFilePath();
@@ -839,12 +974,25 @@ export function logProgress(message: string): void {
 	const entry = `[${timestamp}] ${message}\n`;
 	try {
 		if (!existsSync(filePath)) {
-			const header = `# Ralph Progress Log\n# Task: ${loadPrd()?.task || '(unknown)'}\n# Created: ${timestamp}\n\n`;
+			const task = loadPrd()?.task ?? '';
+			const header = `# Ralph Progress Log\n# Task: ${task}\n# Created: ${timestamp}\n\n`;
 			writeFileSync(filePath, header, 'utf-8');
 		}
 		appendFileSync(filePath, entry, 'utf-8');
-	} catch {
-		// Silently fail — logging must not crash the loop
+	} catch (error) {
+		// Logging must not crash the loop, but record WHY it failed so the agent
+		// can diagnose (disk full, permissions, etc.) — a bare catch{} swallowed
+		// every failure silently before.
+		try {
+			const logPath = join(getStateDir(), 'errors.log');
+			appendFileSync(
+				logPath,
+				`[${timestamp}] logProgress failed: ${(error as Error).message}\n`,
+				'utf-8',
+			);
+		} catch {
+			// even errors.log is unwritable — nothing more we can do
+		}
 	}
 }
 

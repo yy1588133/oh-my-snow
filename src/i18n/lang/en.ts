@@ -50,7 +50,7 @@ export const en: TranslationKeys = {
 			'• Registers MCP server in ~/.snow/settings.json\n' +
 			'• Merges 18 sub-agents into ~/.snow/sub-agents.json\n' +
 			'• Copies 9 skills to ~/.snow/skills/oms/\n' +
-			'• Copies 17 commands to ~/.snow/commands/oms/ (10 workflow + 7 skill mappings)\n' +
+			'• Copies 18 commands to ~/.snow/commands/oms/ (11 workflow + 7 skill mappings)\n' +
 			'• Installs 4 hook configs to ~/.snow/hooks/ (global, with absolute path commands)\n' +
 			'• Creates <project>/.snow/oms-state/ for session state (auto-created per project at runtime)',
 		helpUninstallDetailItems:

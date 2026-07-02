@@ -1,7 +1,7 @@
 /**
  * OMS MCP Server
  *
- * Provides 8 state management tools via stdio transport.
+ * Provides 10 state management tools via stdio transport.
  * No LLM calls — this server only manages orchestration state.
  *
  * Tools:
@@ -12,6 +12,8 @@
  *   oms-complete-task  — Mark a task as completed
  *   oms-snapshot       — Save / restore / list execution snapshots
  *   oms-learn          — Extract reusable patterns + orchestrate skill evolution
+ *   oms-set-team       — Set the team name reference + activate snow-cli Team Mode
+ *   oms-prd            — Ralph PRD management (init/refine/story/criteria/progress)
  *   oms-stop           — End the orchestration session
  */
 
@@ -948,6 +950,28 @@ server.registerTool(
 							isError: true,
 						};
 					}
+					// refine replaces the scaffold with task-specific stories. Refuse
+					// when the task name would end up empty — refinePrd derives
+					// taskToUse = task || existing?.task || '', and an empty task gets
+					// permanently embedded into the PRD and progress.txt headers
+					// (reading "# Task: " with no name). This covers two cases:
+					//   1. No PRD exists AND no task passed (refinePrd would create task='').
+					//   2. A PRD exists but its task is already '' (e.g. a prior
+					//      initProgress-before-init left an empty task) AND no task
+					//      passed — refine would preserve the empty task.
+					const existingPrd = loadPrd();
+					const effectiveTask = params.task || existingPrd?.task || '';
+					if (!effectiveTask) {
+						return {
+							content: [
+								{
+									type: 'text' as const,
+									text: 'Error: No "task" provided and no existing task on the PRD to inherit. Pass a "task" with this refine call (e.g. the original goal), or call oms-prd with action: "init" first with a task.',
+								},
+							],
+							isError: true,
+						};
+					}
 					const prd = refinePrd(
 						params.task || '',
 						params.stories as RefinedStoryInput[],
@@ -1109,13 +1133,61 @@ server.registerTool(
 						};
 					}
 					const passes = params.action === 'mark-passes';
-					const story = setPrdStoryPasses(params.storyId, passes);
-					if (!story) {
+					// Distinguish the three reasons setPrdStoryPasses can return null
+					// (prd missing / story missing / guard refused) so the agent gets
+					// actionable guidance instead of a generic "no story found".
+					const existingPrd = loadPrd();
+					if (!existingPrd) {
+						return {
+							content: [
+								{
+									type: 'text' as const,
+									text: 'Error: No active PRD. Call oms-prd with action: "init" first.',
+								},
+							],
+							isError: true,
+						};
+					}
+					const existingStory = existingPrd.stories.find(
+						s => s.id === params.storyId,
+					);
+					if (!existingStory) {
 						return {
 							content: [
 								{
 									type: 'text' as const,
 									text: `Error: No story found with id "${params.storyId}".`,
+								},
+							],
+							isError: true,
+						};
+					}
+					const story = setPrdStoryPasses(params.storyId, passes);
+					if (!story) {
+						// Story exists + PRD exists → only remaining cause is the guard
+						// (mark-passes:true refused because not all criteria are verified).
+						// Re-load the PRD here for an ACCURATE verified count — the
+						// existingStory snapshot above may be stale if another tool call
+						// verified/unverified a criterion in the gap. setPrdStoryPasses
+						// does its own internal loadPrd, so match that by reading fresh.
+						const freshPrd = loadPrd();
+						const freshStory = freshPrd?.stories.find(
+							s => s.id === params.storyId,
+						);
+						const verifiedCount = freshStory
+							? freshStory.acceptanceCriteria.filter(c => c.verified).length
+							: 0;
+						const totalCount = freshStory
+							? freshStory.acceptanceCriteria.length
+							: existingStory.acceptanceCriteria.length;
+						return {
+							content: [
+								{
+									type: 'text' as const,
+									text:
+										`Error: Cannot mark story "${params.storyId}" as passing — not all acceptance criteria are verified yet.\n` +
+										`Call oms-prd with action: "verify-criterion" for each criterion with fresh evidence first.\n` +
+										`Verified: ${verifiedCount}/${totalCount}`,
 								},
 							],
 							isError: true,
@@ -1147,17 +1219,62 @@ server.registerTool(
 							isError: true,
 						};
 					}
+					// Distinguish "story not found" from "criterion index out of range"
+					// so the agent can correct the right argument.
+					const prd = loadPrd();
+					if (!prd) {
+						return {
+							content: [
+								{
+									type: 'text' as const,
+									text: 'Error: No active PRD. Call oms-prd with action: "init" first.',
+								},
+							],
+							isError: true,
+						};
+					}
+					const targetStory = prd.stories.find(
+						s => s.id === params.storyId,
+					);
+					if (!targetStory) {
+						return {
+							content: [
+								{
+									type: 'text' as const,
+									text: `Error: No story found with id "${params.storyId}".`,
+								},
+							],
+							isError: true,
+						};
+					}
+					if (
+						params.criterionIndex < 0 ||
+						params.criterionIndex >= targetStory.acceptanceCriteria.length
+					) {
+						return {
+							content: [
+								{
+									type: 'text' as const,
+									text:
+										`Error: criterion index ${params.criterionIndex} is out of range for story "${params.storyId}".\n` +
+										`Valid range: 0-${targetStory.acceptanceCriteria.length - 1} (${targetStory.acceptanceCriteria.length} criteria).`,
+								},
+							],
+							isError: true,
+						};
+					}
 					const story = setCriterionVerified(
 						params.storyId,
 						params.criterionIndex,
 						params.verified,
 					);
 					if (!story) {
+						// Defensive — the checks above should make this unreachable.
 						return {
 							content: [
 								{
 									type: 'text' as const,
-									text: `Error: No story found with id "${params.storyId}" or invalid criterion index.`,
+									text: `Error: Could not update criterion ${params.criterionIndex} of story "${params.storyId}".`,
 								},
 							],
 							isError: true,
