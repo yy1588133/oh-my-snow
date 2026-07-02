@@ -256,7 +256,9 @@ function atomicWriteWithLock(
  * On a normal same-device rename this is fully atomic: a reader sees either the
  * old file or the new file, never a partial write. If rename throws (typically
  * EXDEV across filesystems), fall back to a direct writeFileSync — this loses
- * atomicity for that one write, but is better than dropping the update entirely.
+ * atomicity for that one write (a reader can briefly see a partial write), but
+ * is better than dropping the update entirely. This is the ONLY non-atomic path
+ * in the whole write stack, and it's reserved for the cross-device edge case.
  *
  * `.tmp` cleanup is best-effort: it runs on the rename-success path (rename
  * consumes the file) and in both error branches. If writeFileSync itself throws
@@ -267,9 +269,13 @@ function atomicWriteWithLock(
 function tmpRenameWrite(filePath: string, content: string): boolean {
 	// PID-suffixed tmp path so two concurrent writers (locked holder + force
 	// fallback) don't collide on the same `prd.json.tmp` — the lock only
-	// serializes lock acquisition, not the tmp file itself. With per-pid
-	// names, each process writes its own tmp and the loser's rename either
-	// wins (last writer) or fails cleanly, but never corrupts the winner's tmp.
+	// serializes lock acquisition, not the tmp file itself. With per-pid names,
+	// each process writes its own tmp; on a same-device rename the loser's rename
+	// either wins (last writer) or throws (and the file is left for cleanup).
+	// Note: this guarantees cross-PROCESS isolation (distinct PIDs → distinct
+	// tmps). It does NOT protect against re-entrant writes within the same process,
+	// but tmpRenameWrite is fully synchronous (writeFileSync + renameSync) so Node's
+	// single-threaded execution makes same-process re-entry impossible.
 	const tmpPath = `${filePath}.${process.pid}.tmp`;
 	try {
 		writeFileSync(tmpPath, content, 'utf-8');
@@ -314,6 +320,42 @@ export function saveState(state: OmsState): void {
 	atomicWriteWithLock(getStateFilePath(), JSON.stringify(state, null, 2), 'skip');
 }
 
+/**
+ * Sweep leftover lock + tmp files for a base path (e.g. state.json / prd.json).
+ * Shared by deleteState and deletePrd so the cleanup rule lives in ONE place.
+ *
+ * Matches exactly two filename shapes — anchored to the PID-suffixed tmp format
+ * (tmpRenameWrite writes `<base>.<pid>.tmp`), NOT a loose `*.tmp` glob, so a
+ * user's intentional `prd.json.backup.tmp` or `state.json.export.tmp` is NOT
+ * swept up:
+ *   - `<base>.lock`        — the lock file atomicWriteWithLock acquires
+ *   - `<base>.<digits>.tmp` — a PID-suffixed tmp from a crashed/timed-out write
+ *
+ * `<digits>` is matched via regex (PID is a positive integer on every platform).
+ */
+function cleanupTmpFiles(filePath: string): void {
+	const dir = dirname(filePath);
+	const base = basename(filePath);
+	const tmpRe = new RegExp(`^${escapeRegex(base)}\\.(\\d+)\\.tmp$`);
+	try {
+		for (const name of readdirSync(dir)) {
+			if (name === `${base}.lock` || tmpRe.test(name)) {
+				try {
+					unlinkSync(join(dir, name));
+				} catch {}
+			}
+		}
+	} catch {}
+}
+
+/**
+ * Escape a literal string for use inside a RegExp (so dots/etc. in a filename
+ * are treated as literals, not metacharacters). Mirrors MDN's recommended escape.
+ */
+function escapeRegex(s: string): string {
+	return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
 export function deleteState(): void {
 	const filePath = getStateFilePath();
 	if (existsSync(filePath)) {
@@ -331,17 +373,8 @@ export function deleteState(): void {
 			unlinkSync(markerPath);
 		} catch {}
 	}
-	// Clean up lock + tmp files from saveState (tmp is now PID-suffixed, so
-	// glob the dir for all `*.lock` and `*.tmp` variants rather than a fixed path).
-	const dir = dirname(filePath);
-	const base = basename(filePath);
-	try {
-		for (const name of readdirSync(dir)) {
-			if (name === `${base}.lock` || (name.startsWith(`${base}.`) && name.endsWith('.tmp'))) {
-				try { unlinkSync(join(dir, name)); } catch {}
-			}
-		}
-	} catch {}
+	// Clean up lock + PID-suffixed tmp files from saveState.
+	cleanupTmpFiles(filePath);
 }
 
 // ── State mutations ──
@@ -577,10 +610,13 @@ export interface PrdStory {
 	passes: boolean;
 	/**
 	 * Whether this story has been EXPLICITLY rejected by a reviewer via
-	 * setPrdStoryPasses(id, false). Distinct from `passes: false` on a fresh
-	 * story (which means "not yet verified, may auto-lift on full verification"):
-	 * a `rejected` story must NOT auto-lift passes on re-verify — the agent has
-	 * to explicitly call mark-passes(true) to re-pass. Cleared by mark-passes(true).
+	 * setPrdStoryPasses(id, false). When a reject happens, ALL criterion
+	 * `verified` flags are also cleared (evidence invalidated), forcing the
+	 * agent to re-verify each one with fresh evidence before mark-passes(true)
+	 * can succeed. The `rejected` flag additionally blocks setCriterionVerified's
+	 * auto-lift as a second defense-in-depth layer — an explicit mark-passes(true)
+	 * is required to re-pass and clear the veto. Distinct from `passes: false` on
+	 * a fresh story (rejected=false, auto-lift allowed on full verification).
 	 */
 	rejected: boolean;
 	/** Priority (lower = higher priority, foundational work first) */
@@ -662,11 +698,17 @@ function savePrd(prd: Prd): void {
  * scaffold WITHOUT force-writing it — force-writing could clobber a PRD the
  * winner already refined in the gap or resurrect a state the user cleared via
  * oms-stop. Persistence is deferred to the caller's next mutation (refinePrd).
+ *
+ * @returns an object with the PRD (always present, possibly in-memory only) and
+ *          `wrote` — whether this call actually persisted the scaffold to disk.
+ *          Callers that surface a "created" message to the agent should check
+ *          `wrote` so they don't claim success for a race-lost in-memory scaffold.
  */
-export function initPrd(task: string): Prd {
+export function initPrd(task: string): {prd: Prd; wrote: boolean} {
 	const existing = loadPrd();
 	if (existing) {
-		return existing;
+		// PRD already on disk — not written by this call.
+		return {prd: existing, wrote: false};
 	}
 	const now = new Date().toISOString();
 	const prd: Prd = {
@@ -705,7 +747,7 @@ export function initPrd(task: string): Prd {
 		// instead of clobbering it with our scaffold.
 		const theirs = loadPrd();
 		if (theirs) {
-			return theirs;
+			return {prd: theirs, wrote: false};
 		}
 		// Lost the race AND no PRD on disk (winner wrote then deleted, or transient
 		// lock failure). Do NOT force-write our scaffold here — that could clobber
@@ -713,14 +755,40 @@ export function initPrd(task: string): Prd {
 		// user explicitly cleared via oms-stop. Return the in-memory scaffold so
 		// the caller still has an object; if persistence is required, the caller's
 		// next mutation (refinePrd) will write under the lock and reconcile.
+		return {prd, wrote: false};
 	}
-	return prd;
+	return {prd, wrote: true};
 }
 
 export interface RefinedStoryInput {
 	title: string;
 	acceptanceCriteria: string[]; // plain criterion texts — wrapped in AcceptanceCriterion
 	priority: number;
+}
+
+/**
+ * Validate a story's priority and acceptance criteria before persisting it.
+ * Centralizes the rules so refinePrd and addPrdStory stay consistent (DRY):
+ *   - priority must be a positive integer (>= 1)
+ *   - acceptanceCriteria must be non-empty (Ralph verifies EACH criterion — an
+ *     empty array would make mark-passes(true)'s `every(verified)` vacuously true
+ *     and let an unverified story pass, violating the core invariant)
+ * Throws on the first invalid story with a 1-based index for actionable diagnosis.
+ */
+function validateStoryInput(
+	story: {title: string; acceptanceCriteria: string[]; priority: number},
+	index: number,
+): void {
+	if (!Number.isInteger(story.priority) || story.priority < 1) {
+		throw new Error(
+			`Story ${index + 1} has invalid priority ${story.priority}: must be a positive integer (>= 1).`,
+		);
+	}
+	if (story.acceptanceCriteria.length === 0) {
+		throw new Error(
+			`Story ${index + 1} has no acceptance criteria — at least one is required so Ralph can verify each before passing.`,
+		);
+	}
 }
 
 /**
@@ -745,24 +813,25 @@ export function refinePrd(
 	const taskToUse = task || existing?.task || '';
 	const now = new Date().toISOString();
 
-	const refinedStories: PrdStory[] = stories.map((s, i) => {
-		if (!Number.isInteger(s.priority) || s.priority < 1) {
-			throw new Error(`Story ${i + 1} "${s.title}" has invalid priority ${s.priority}: must be a positive integer (>= 1).`);
-		}
-		return {
-			id: `US-${String(i + 1).padStart(3, '0')}`,
-			title: s.title,
-			acceptanceCriteria: s.acceptanceCriteria.map(criterion => ({
-				criterion,
-				verified: false,
-			})),
-			passes: false,
-			rejected: false,
-			priority: s.priority,
-			createdAt: now,
-			updatedAt: now,
-		};
-	});
+	// Validate BEFORE building any story objects — a bad priority or empty
+	// criteria never reaches disk. Throws on the first invalid story.
+	stories.forEach((s, i) => validateStoryInput(s, i));
+
+	// validateStoryInput already enforced priority + non-empty criteria above,
+	// so this map only constructs the stored object (no re-check needed here).
+	const refinedStories: PrdStory[] = stories.map((s, i) => ({
+		id: `US-${String(i + 1).padStart(3, '0')}`,
+		title: s.title,
+		acceptanceCriteria: s.acceptanceCriteria.map(criterion => ({
+			criterion,
+			verified: false,
+		})),
+		passes: false,
+		rejected: false,
+		priority: s.priority,
+		createdAt: now,
+		updatedAt: now,
+	}));
 
 	const prd: Prd = {
 		task: taskToUse,
@@ -788,6 +857,11 @@ export function refinePrd(
 /**
  * Add a new story (discovered during implementation).
  * Returns the added story.
+ *
+ * Validates priority + non-empty criteria via the same validateStoryInput used by
+ * refinePrd, so the store-layer invariant (positive integer priority, >= 1
+ * criterion) holds for both entry points — the MCP layer's zod schema is the
+ * first line of defense, this is the store-layer backstop for non-MCP callers.
  */
 export function addPrdStory(
 	title: string,
@@ -798,6 +872,9 @@ export function addPrdStory(
 	if (!prd) {
 		return null;
 	}
+	// Validate BEFORE mutation — use the existing stories length as the 1-based
+	// index in the error message so it matches the would-be story number.
+	validateStoryInput({title, acceptanceCriteria, priority}, prd.stories.length);
 	const now = new Date().toISOString();
 	const nextId = `US-${String(prd.stories.length + 1).padStart(3, '0')}`;
 	const story: PrdStory = {
@@ -840,28 +917,36 @@ export function getPrdStory(storyId: string): PrdStory | null {
 }
 
 /**
- * Mark a story's passes flag.
+ * Mark a story's passes flag, or unmark it (reviewer rejection / rework).
  *
- * NOTE: this ONLY flips `passes`. It does NOT touch `acceptanceCriteria[].verified`
- * — verified flags must be set individually via setCriterionVerified() with
- * fresh evidence per criterion. Forcing verified=true here would let an agent
- * bypass per-criterion verification (the core Ralph invariant). The only place
- * `passes` is auto-derived is setCriterionVerified (passes = allCriteriaVerified).
- *
- * When setting passes:false (unmark, on reviewer rejection), criteria verified
- * flags are left as-is — the agent re-verifies them individually on the next pass.
+ * NOTE: this ONLY flips `passes` plus the `rejected` veto flag. The
+ * acceptanceCriteria[].verified flags are managed by setCriterionVerified()
+ * with one exception (see mark-passes(false) below). Forcing verified=true here
+ * would let an agent bypass per-criterion verification (the core Ralph
+ * invariant). The only place `passes` is auto-derived is setCriterionVerified
+ * (passes = allCriteriaVerified on a non-rejected story).
  *
  * The guard is intentionally asymmetric — only passes:true is gated on every()
  * being verified:
  *   - mark-passes(true)  on an unverified story → REFUSED (null). Forces evidence.
- *   - mark-passes(true)  on a fully-verified story → OK (idempotent).
+ *   - mark-passes(true)  on a fully-verified story → OK (idempotent; also clears
+ *     any prior `rejected` veto so the story is back to a clean pass state).
  *   - mark-passes(false) on any story → always OK (unmark needs no precondition;
- *     reviewer can reject at will). After unmark, verified flags stay true so a
- *     later mark-passes(true) re-passes without re-verifying — that's intended:
- *     evidence doesn't vanish just because the story was sent back for rework.
+ *     reviewer can reject at will). It CLEARS every criterion's `verified` flag
+ *     AND sets `rejected=true`, so the agent must re-verify EACH criterion with
+ *     fresh evidence before mark-passes(true) can succeed again. This is the
+ *     veto: a reviewer's "打回" invalidates prior evidence, the agent cannot
+ *     rubber-stamp the story back via a bare mark-passes(true).
  *
- * Note: after a reject, verify-criterion will NOT auto-lift passes — an explicit
- * mark-passes(true) is required to re-pass (see setCriterionVerified JSDoc).
+ * Why mark-passes(false) clears verified flags (design choice, was previously
+ * "leave as-is"): keeping verified=true across a reject let an agent bypass the
+ * veto — mark-passes(true)'s `every(verified)` guard would pass immediately
+ * without any re-verification, making the reject a no-op. Clearing evidence on
+ * reject forces a genuine rework cycle: reject → (criteria now unverified) →
+ * re-verify each with fresh evidence → mark-passes(true) succeeds. The
+ * `rejected` flag additionally blocks setCriterionVerified's auto-lift, so the
+ * agent MUST end with an explicit mark-passes(true) rather than relying on the
+ * "last criterion verified → passes auto-flips" convenience.
  */
 export function setPrdStoryPasses(
 	storyId: string,
@@ -882,11 +967,20 @@ export function setPrdStoryPasses(
 		return null;
 	}
 	story.passes = passes;
-	// Track explicit rejection so setCriterionVerified can distinguish a fresh
-	// `passes: false` (not yet verified — auto-lift on full verification) from a
-	// rejected `passes: false` (reviewer veto — no auto-lift, explicit mark-passes
-	// required). mark-passes(true) clears the veto.
-	story.rejected = !passes;
+	if (passes) {
+		// Re-passing clears any prior veto — the story is back to a clean pass.
+		story.rejected = false;
+	} else {
+		// Reject / unmark: invalidate ALL prior evidence so mark-passes(true) can't
+		// rubber-stamp the story back without re-verification. This is what makes a
+		// reviewer's rejection a real veto rather than a no-op the agent can skip.
+		// The `rejected` flag additionally blocks setCriterionVerified's auto-lift,
+		// forcing an explicit mark-passes(true) to re-pass.
+		for (const c of story.acceptanceCriteria) {
+			c.verified = false;
+		}
+		story.rejected = true;
+	}
 	story.updatedAt = new Date().toISOString();
 	savePrd(prd);
 	return story;
@@ -908,12 +1002,13 @@ export function setPrdStoryPasses(
  *     flipping one criterion to false silently unmarked the whole story.
  *
  * Interaction with reviewer rejection (veto semantics):
- *   After setPrdStoryPasses(id, false) rejects a story, the verified flags stay
- *   true (evidence is preserved) BUT passes is now false, and re-verifying any
- *   criterion does NOT auto-lift passes. The agent must explicitly call
- *   mark-passes(true) to re-pass the story — a reviewer's rejection is a real
- *   veto, not something a noop re-verify (verified=true on an already-true flag)
- *   can override. To permanently block a story, delete it or rewrite its criteria.
+ *   setPrdStoryPasses(id, false) (reviewer reject) clears ALL verified flags AND
+ *   sets rejected=true. So after a reject, the agent finds every criterion
+ *   unverified and must re-verify each one with fresh evidence. The `!rejected`
+ *   guard below is a SECOND layer of defense: even if some path left verified
+ *   flags set after a reject, auto-lift would still be blocked until an explicit
+ *   mark-passes(true) clears the veto. To permanently block a story, delete it
+ *   or rewrite its criteria.
  */
 export function setCriterionVerified(
 	storyId: string,
@@ -987,6 +1082,11 @@ export function getPrdStatus(): {
  * If no PRD exists yet (agent called init-progress before init), the header is
  * written with a visible '(no PRD yet)' marker so the empty header is diagnosable
  * — the next refinePrd deletes this file and rebuilds it with the real task.
+ *
+ * NOTE: uses `??` (not `||`) so a PRD whose task is intentionally an empty
+ * string stays accurate ('# Task: ' empty) rather than being misreported as
+ * '(no PRD yet)'. The '(no PRD yet)' marker only fires when loadPrd() itself
+ * returns null — the PRD is genuinely absent.
  */
 export function initProgress(): boolean {
 	const filePath = getProgressFilePath();
@@ -994,7 +1094,8 @@ export function initProgress(): boolean {
 		return false;
 	}
 	ensureStateDir();
-	const task = loadPrd()?.task || '(no PRD yet)';
+	const prd = loadPrd();
+	const task = prd ? (prd.task ?? '') : '(no PRD yet)';
 	const header = `# Ralph Progress Log\n# Task: ${task}\n# Created: ${new Date().toISOString()}\n\n`;
 	writeFileSync(filePath, header, 'utf-8');
 	return true;
@@ -1018,7 +1119,8 @@ export function logProgress(message: string): void {
 	const entry = `[${timestamp}] ${message}\n`;
 	try {
 		if (!existsSync(filePath)) {
-			const task = loadPrd()?.task || '(no PRD yet)';
+			const prd = loadPrd();
+			const task = prd ? (prd.task ?? '') : '(no PRD yet)';
 			const header = `# Ralph Progress Log\n# Task: ${task}\n# Created: ${timestamp}\n\n`;
 			writeFileSync(filePath, header, 'utf-8');
 		}
@@ -1067,14 +1169,7 @@ export function deletePrd(): void {
 			unlinkSync(progressPath);
 		} catch {}
 	}
-	// Clean up lock + tmp files (tmp is now PID-suffixed, so glob the dir)
-	const dir = dirname(prdPath);
-	const base = basename(prdPath);
-	try {
-		for (const name of readdirSync(dir)) {
-			if (name === `${base}.lock` || (name.startsWith(`${base}.`) && name.endsWith('.tmp'))) {
-				try { unlinkSync(join(dir, name)); } catch {}
-			}
-		}
-	} catch {}
+	// Clean up lock + PID-suffixed tmp files from savePrd (shared helper so the
+	// rule stays in sync with deleteState's cleanup).
+	cleanupTmpFiles(prdPath);
 }

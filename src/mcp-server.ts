@@ -843,7 +843,7 @@ server.registerTool(
 				.array(
 					z.object({
 						title: z.string(),
-						acceptanceCriteria: z.array(z.string()),
+						acceptanceCriteria: z.array(z.string()).min(1),
 						priority: z.number().int().positive(),
 					}),
 				)
@@ -857,9 +857,10 @@ server.registerTool(
 				.describe('Story title (required for "add-story")'),
 			acceptanceCriteria: z
 				.array(z.string())
+				.min(1)
 				.optional()
 				.describe(
-					'Acceptance criteria texts (required for "add-story")',
+					'Acceptance criteria texts (required for "add-story"). At least one criterion is required so Ralph can verify each before passing.',
 				),
 			priority: z
 				.number()
@@ -942,27 +943,74 @@ server.registerTool(
 							isError: true,
 						};
 					}
-					const prd = initPrd(params.task);
+					const {prd, wrote} = initPrd(params.task);
+					// `wrote` distinguishes "we persisted the scaffold" from "we lost the
+					// lock race and are returning the winner's in-memory/disk PRD". The
+					// agent-facing message must reflect which happened — claiming "created"
+					// for a race-lost scaffold misleads the agent into refining a PRD that
+					// may already have been refined by the winner.
+					if (wrote) {
+						return {
+							content: [
+								{
+									type: 'text' as const,
+									text:
+										`✅ PRD scaffold created.\n\n` +
+										`Task: ${prd.task}\n` +
+										`Stories: ${prd.stories.length} (scaffold)\n\n` +
+										`⚠️ CRITICAL: The scaffold has generic acceptance criteria.\n` +
+										`You MUST refine it with task-specific stories by calling oms-prd with action: "refine"\n` +
+										`before entering the persistence loop.\n\n` +
+										`Scaffold story:\n` +
+										prd.stories
+											.map(
+												s =>
+													`  ${s.id}: ${s.title} (priority ${s.priority})`,
+											)
+											.join('\n'),
+								},
+							],
+						};
+					}
+					// `wrote === false` here means one of two race outcomes, both benign:
+					//   (a) Another session created the PRD between our pre-check and
+					//       initPrd's internal loadPrd — we return theirs (now on disk).
+					//   (b) We lost the lock race AND no PRD landed on disk (winner wrote
+					//       then deleted, or transient lock failure) — we return an
+					//       in-memory scaffold with no persistence.
+					// Distinguish by re-loading: if a PRD is now on disk, case (a) —
+					// surface it so the agent refines the real PRD; if not, case (b) —
+					// tell the agent persistence is deferred to the next refine.
+					const onDisk = loadPrd();
+					if (onDisk) {
+						return {
+							content: [
+								{
+									type: 'text' as const,
+									text:
+										`⚠️ A PRD was created concurrently by another session — using theirs instead of writing a new scaffold.\n\n` +
+										`Task: ${onDisk.task}\n` +
+										`Refined: ${onDisk.refined}\n` +
+										`Stories: ${onDisk.stories.length}\n\n` +
+										`Call oms-prd with action: "refine" if you need task-specific stories,\n` +
+										`or action: "status" to inspect what the other session set up.`,
+								},
+							],
+						};
+					}
 					return {
 						content: [
 							{
 								type: 'text' as const,
 								text:
-									`✅ PRD scaffold created.\n\n` +
-									`Task: ${prd.task}\n` +
-									`Stories: ${prd.stories.length} (scaffold)\n\n` +
-									`⚠️ CRITICAL: The scaffold has generic acceptance criteria.\n` +
-									`You MUST refine it with task-specific stories by calling oms-prd with action: "refine"\n` +
-									`before entering the persistence loop.\n\n` +
-									`Scaffold story:\n` +
-									prd.stories
-										.map(
-											s =>
-												`  ${s.id}: ${s.title} (priority ${s.priority})`,
-										)
-										.join('\n'),
+									`⚠️ PRD scaffold was created in memory but NOT persisted to disk (lock contention with no winner write-through).\n\n` +
+									`Task (in-memory): ${prd.task}\n\n` +
+									`Recommended action: call oms-prd with action: "refine" — refinePrd writes\n` +
+									`under the lock and will reconcile/persist the PRD. Do NOT assume the\n` +
+									`scaffold is on disk until refine succeeds.`,
 							},
 						],
+						isError: true,
 					};
 				}
 
@@ -1279,13 +1327,41 @@ server.registerTool(
 						};
 					}
 					const allVerified = story.acceptanceCriteria.every(c => c.verified);
+					// Build a status line that explains WHY passes is what it is, so the
+					// agent doesn't see "all verified = true" + "passes = false" and get
+					// confused. After a reviewer reject (rejected=true), passes can't
+					// auto-lift even when all criteria are verified — the agent must
+					// explicitly call mark-passes(true). Surface that requirement here.
+					let statusLine: string;
+					if (story.passes) {
+						statusLine = `Story passes: true (all criteria verified)`;
+					} else if (story.rejected) {
+						// Split on allVerified so the message names the ACTUAL blocker:
+						//   - all verified → only the veto blocks auto-lift (needs mark-passes(true))
+						//   - not all verified → BOTH incomplete evidence AND the veto block
+						if (allVerified) {
+							statusLine =
+								`Story passes: false — story was REJECTED by a reviewer.\n` +
+								`All criteria are verified, but auto-lift is blocked by the reject veto.\n` +
+								`To re-pass: call oms-prd with action: "mark-passes" and storyId "${story.id}".`;
+						} else {
+							statusLine =
+								`Story passes: false — story was REJECTED by a reviewer.\n` +
+								`Not all criteria are verified yet (${story.acceptanceCriteria.filter(c => c.verified).length}/${story.acceptanceCriteria.length}), AND auto-lift is blocked by the reject veto.\n` +
+								`To re-pass: re-verify each criterion via "verify-criterion", then call oms-prd with action: "mark-passes" and storyId "${story.id}".`;
+						}
+					} else {
+						statusLine =
+							`Story passes: false (all criteria verified = ${allVerified}).\n` +
+							`Auto-lifts to true once the last criterion is verified.`;
+					}
 					return {
 						content: [
 							{
 								type: 'text' as const,
 								text:
 									`✅ Criterion ${params.criterionIndex} of ${story.id} verified=${params.verified}.\n` +
-									`Story passes (auto): ${story.passes} (all criteria verified = ${allVerified})`,
+									statusLine,
 							},
 						],
 					};

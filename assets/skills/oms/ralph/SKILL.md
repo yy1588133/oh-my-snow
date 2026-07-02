@@ -78,12 +78,13 @@ For EACH acceptance criterion in the story, verify it is met with **fresh eviden
 - Run relevant checks (test, build, lint, typecheck) via terminal-execute and READ the output
 - For EACH criterion that passes, call `oms-prd` with `action: "verify-criterion"` and the story id + criterion index — this records the verification in `prd.json`. **This is the only way to set `verified=true`**; `mark-passes` will be REFUSED unless every criterion is already verified.
 - If ANY criterion is NOT met, continue working — do NOT mark the story complete, and do NOT call `verify-criterion` for the unmet criterion
+- NOTE: on a fresh (non-rejected) story, verifying the LAST criterion auto-lifts `passes=true` as a convenience. On a REJECTED story this auto-lift is blocked — you MUST end with an explicit `mark-passes` (see Step 5).
 
 ### Step 5 — Mark Story Complete
 
 When ALL acceptance criteria are verified (each has `verified=true` from Step 4):
 
-- Call `oms-prd` with `action: "mark-passes"` and the story id — confirms `passes: true`. This is a final sign-off, not a shortcut: the tool refuses the call if any criterion is still unverified, so you cannot rubber-stamp a story.
+- Call `oms-prd` with `action: "mark-passes"` and the story id — confirms `passes: true`. This is a final sign-off, not a shortcut: the tool refuses the call if any criterion is still unverified, so you cannot rubber-stamp a story. This call also clears any prior `rejected` veto.
 - Call `oms-prd` with `action: "log-progress"` with a summary: what was implemented, files changed, learnings for future iterations
 - Add any discovered codebase patterns to `progress.txt`
 
@@ -140,7 +141,8 @@ After Step 7.6 passes:
 
 - Fix the issues raised by the reviewer
 - Re-verify the affected stories with the same reviewer
-- If a story no longer meets its criteria, call `oms-prd` with `action: "unmark-passes"` to set `passes: false` again
+- If a story no longer meets its criteria, call `oms-prd` with `action: "unmark-passes"` to reject it — this clears ALL criterion `verified` flags AND sets `rejected=true` (a real veto: the story cannot auto-lift on re-verify, and `mark-passes(true)` will be refused until every criterion is re-verified)
+- To re-pass a rejected story: re-verify EACH criterion with fresh evidence via `verify-criterion`, then call `mark-passes(true)` — the explicit `mark-passes` clears the veto
 - Loop back to **Step 2** to continue
 
 ---
@@ -171,9 +173,9 @@ After Step 7.6 passes:
 | `add-story` | Add a new story discovered during implementation |
 | `next-story` | Get highest-priority story with passes:false |
 | `get-story` | Read a story's full details + acceptance criteria |
-| `verify-criterion` | Mark a SINGLE acceptance criterion verified=true with fresh evidence (the ONLY way to set verified). When the last criterion is verified, `passes` auto-flips to true. |
-| `mark-passes` | Final confirmation of `passes:true`. REFUSED unless every criterion is already `verified` (enforced at the data layer) — so you MUST call `verify-criterion` for each criterion first. |
-| `unmark-passes` | Revert `passes` to false (on reviewer rejection). Does NOT clear per-criterion `verified` flags — re-verify each one with fresh evidence on the next pass. |
+| `verify-criterion` | Mark a SINGLE acceptance criterion verified=true with fresh evidence (the ONLY way to set verified). On a FRESH (non-rejected) story, verifying the LAST criterion auto-lifts `passes` to true as a convenience. On a REJECTED story (reviewer veto), auto-lift is blocked — you MUST end with an explicit `mark-passes`. |
+| `mark-passes` | Final confirmation of `passes:true`. REFUSED unless every criterion is already `verified` (enforced at the data layer) — so you MUST call `verify-criterion` for each criterion first. Also clears any prior `rejected` veto, returning the story to a clean pass. |
+| `unmark-passes` | Revert `passes` to false (on reviewer rejection). This is a REAL VETO: it clears every criterion's `verified` flag AND sets `rejected=true`, so the agent MUST re-verify EACH criterion with fresh evidence AND then call `mark-passes(true)` to re-pass — a bare mark-passes(true) without re-verification will be refused. |
 | `status` | Get PRD completion summary (X/Y stories, remaining) |
 | `init-progress` | Initialize progress.txt |
 | `log-progress` | Append a learning/progress entry to progress.txt |
