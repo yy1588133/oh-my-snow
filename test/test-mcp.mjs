@@ -1,6 +1,20 @@
 import { spawn } from 'child_process';
+import { mkdtempSync, rmSync, readFileSync, existsSync, writeFileSync, mkdirSync } from 'fs';
+import { tmpdir } from 'os';
+import { join, resolve } from 'path';
 
-const child = spawn('node', ['dist/mcp-server.js'], { stdio: ['pipe', 'pipe', 'pipe'] });
+// Isolate ALL state to a temp dir so the test never touches the real
+// .snow/settings.json or .snow/oms-state/ of the package directory.
+// setProjectTeamMode (called by oms-set-team) writes <cwd>/.snow/settings.json,
+// so cwd MUST point at the temp dir too. But the server script path must be
+// ABSOLUTE — otherwise node resolves it relative to cwd (the temp dir) and fails.
+const tmpRoot = mkdtempSync(join(tmpdir(), 'oms-mcp-test-'));
+const serverScript = resolve('dist/mcp-server.js');
+const child = spawn('node', [serverScript], {
+	stdio: ['pipe', 'pipe', 'pipe'],
+	cwd: tmpRoot,
+	env: { ...process.env, OMS_STATE_DIR: join(tmpRoot, '.snow', 'oms-state') },
+});
 
 let buffer = '';
 child.stdout.on('data', (data) => { buffer += data.toString(); });
@@ -123,15 +137,82 @@ async function runTests() {
 	const r10c = await waitForResponse(14);
 	assert('oms-get-state shows teamName', r10c?.result?.content?.[0]?.text?.includes('Team:') && r10c?.result?.content?.[0]?.text?.includes('refactor-utils'), JSON.stringify(r10c).slice(0, 300));
 
-	// Tool: oms-stop
+	// ── setProjectTeamMode verification (US-team-activation) ──
+	// oms-set-team must have written teamMode=true to <cwd>/.snow/settings.json.
+	// This is the critical activation link: without it, snow-cli never mounts team-* tools.
+	const settingsPath = join(tmpRoot, '.snow', 'settings.json');
+	assert('settings.json was created by oms-set-team', existsSync(settingsPath), 'settings.json missing');
+
+	let settingsOk = false;
+	let settingsTeamMode = undefined;
+	let settingsPreserved = true;
+	try {
+		const settings = JSON.parse(readFileSync(settingsPath, 'utf-8'));
+		settingsTeamMode = settings.teamMode;
+		settingsOk = settings.teamMode === true;
+		// teamMode should NOT be the only field — OMS must not clobber existing settings.
+		// (Here the file didn't exist before, so only teamMode is present — that's fine.
+		// The preservation guarantee is tested by the pre-existing-fields test below.)
+	} catch (e) {
+		settingsOk = false;
+	}
+	assert('oms-set-team wrote teamMode=true to settings.json', settingsOk, `teamMode=${settingsTeamMode}`);
+
+	// Verify oms-set-team response mentions the next-turn tool visibility (key UX cue)
+	assert('oms-set-team warns team-* tools appear next turn', r10b?.result?.content?.[0]?.text?.includes('NEXT turn'), JSON.stringify(r10b).result?.content?.[0]?.text?.slice(0, 300));
+
+	// ── Field preservation test: pre-existing settings.json fields must survive the write ──
+	// Stop the session, pre-seed settings.json with extra fields, start a new session,
+	// call oms-set-team again, and confirm the extra fields are still there.
 	send('tools/call', { name: 'oms-stop', arguments: {} });
-	const r11 = await waitForResponse(15);
+	await waitForResponse(15);
+
+	// Pre-seed settings.json with user fields (ensure .snow dir exists first)
+	mkdirSync(join(tmpRoot, '.snow'), { recursive: true });
+	writeFileSync(settingsPath, JSON.stringify({
+		yoloMode: true,
+		planMode: true,
+		customUserField: 'preserve-me',
+		nested: { keep: 'yes' },
+	}, null, 2), 'utf-8');
+
+	// New session
+	send('tools/call', { name: 'oms-start', arguments: { goal: 'team activation 2' } });
+	await waitForResponse(16);
+	send('tools/call', { name: 'oms-set-team', arguments: { teamName: 'team-b' } });
+	const rPreserve = await waitForResponse(17);
+
+	let preservedOk = false;
+	let preservedDetail = '';
+	try {
+		const settings = JSON.parse(readFileSync(settingsPath, 'utf-8'));
+		preservedOk = settings.teamMode === true
+			&& settings.yoloMode === true
+			&& settings.planMode === true
+			&& settings.customUserField === 'preserve-me'
+			&& settings.nested?.keep === 'yes';
+		if (!preservedOk) preservedDetail = JSON.stringify(settings).slice(0, 300);
+	} catch (e) {
+		preservedDetail = `parse error: ${e.message}`;
+	}
+	assert('oms-set-team preserves pre-existing settings.json fields', preservedOk, preservedDetail);
+
+	// ── Idempotency test: calling oms-set-team when teamMode already true should not error ──
+	send('tools/call', { name: 'oms-set-team', arguments: { teamName: 'team-b' } });
+	const rIdem = await waitForResponse(18);
+	assert('oms-set-team idempotent (second call still succeeds)', rIdem?.result?.content?.[0]?.text?.includes('Team name set'), JSON.stringify(rIdem).slice(0, 200));
+
+	// Tool: oms-stop (final cleanup of the second session)
+	send('tools/call', { name: 'oms-stop', arguments: {} });
+	const r11 = await waitForResponse(19);
 	assert('oms-stop ends session', r11?.result?.content?.[0]?.text?.includes('stopped'), JSON.stringify(r11).slice(0, 200));
 
 	console.log(`\n${'='.repeat(50)}`);
 	console.log(`Results: ${pass} passed, ${fail} failed`);
 
 	child.kill();
+	// Clean up the temp dir (state + settings.json isolation)
+	try { rmSync(tmpRoot, { recursive: true, force: true }); } catch {}
 	process.exit(fail > 0 ? 1 : 0);
 }
 

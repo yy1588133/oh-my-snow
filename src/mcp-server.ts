@@ -372,7 +372,7 @@ server.registerTool(
 	'oms-set-team',
 	{
 		description:
-			'Set the team name reference on the OMS state. Used by /oms:team to record which snow-cli team this session orchestrates. OMS only stores the name — the authoritative team state lives in snow-cli (~/.snow/teams/<team>/).',
+			'Set the team name reference on the OMS state AND activate snow-cli Team Mode (writes teamMode=true to project .snow/settings.json). Used by /oms:team. After calling this, team-* tools (spawn_teammate, create_task, etc.) become visible on the next turn (snow-cli rebuilds the tool list because teamMode is part of configHash). OMS only stores the team name — authoritative team state lives in snow-cli.',
 		inputSchema: {
 			teamName: z
 				.string()
@@ -399,7 +399,15 @@ server.registerTool(
 				content: [
 					{
 						type: 'text' as const,
-						text: `✅ Team name set: ${updated.teamName}\n\nOMS is now in multi-agent team mode.\nThe snow-cli team "${params.teamName}" owns the authoritative team state.\nUse team-* tools (spawn_teammate, create_task, etc.) to orchestrate teammates.`,
+						text:
+							`✅ Team name set: ${updated.teamName}\n\n` +
+							`OMS is now in multi-agent team mode.\n` +
+							`snow-cli Team Mode has been ACTIVATED (teamMode=true written to .snow/settings.json).\n\n` +
+							`⚠️ IMPORTANT — team-* tools (team-spawn_teammate, team-create_task, etc.) will appear on your NEXT turn.\n` +
+							`snow-cli rebuilds the tool list when teamMode changes (configHash includes teamMode).\n` +
+							`Do NOT try to call team-* tools in THIS turn — they are not mounted yet.\n\n` +
+							`Continue with planning (use oms-add-task for the local task list), then call\n` +
+							`oms-set-stage { stage: "executing" } — by then team-* tools will be available.`,
 					},
 				],
 			};

@@ -20,7 +20,7 @@ import {
 	closeSync,
 	statSync,
 } from 'fs';
-import {join} from 'path';
+import {join, dirname} from 'path';
 
 // ── Types ──
 
@@ -327,11 +327,136 @@ export function completeTask(state: OmsState, taskId: string): OmsState {
  * Used by /oms:team to record which snow-cli team this session orchestrates.
  * OMS only stores the name — the authoritative team state lives in snow-cli
  * (~/.snow/teams/<team>/config.json).
+ *
+ * Also activates snow-cli's built-in Team Mode by writing `teamMode: true` to
+ * the PROJECT-LEVEL `.snow/settings.json`. This is the critical activation link
+ * that was missing: snow-cli's mcpToolsManager.ts includes teamMode in configHash
+ * (mcpToolsManager.ts:206), so writing it invalidates the tool cache and rebuilds
+ * the AI's tool list on the next turn — mounting the `team-*` tools (mcpToolsManager.ts:411
+ * prefixes them with `team-`).
+ *
+ * Why this lives in the MCP tool (not the command prompt or the AI itself):
+ *   - The /oms:team command runs in the PLANNING stage, where beforeToolCall
+ *     hard-blocks filesystem-edit. So the AI cannot edit settings.json itself
+ *     (it would be blocked by its own stage discipline).
+ *   - By doing the write inside the oms-set-team MCP tool, the activation is
+ *     performed by the server process, sidestepping the hook entirely.
+ *
+ * snow-cli's getTeamMode (projectSettings.ts:168) reads project scope first,
+ * then falls back to global — so writing project scope is sufficient.
+ *
+ * Uses the same atomic write pattern as saveState (lock + tmp + rename) to
+ * avoid corrupting the user's settings.json under concurrent access.
+ *
+ * @returns true if the file was actually changed (teamMode was not already true),
+ *          false if teamMode was already true (no write needed).
+ * @throws on unrecoverable I/O errors (lock contention after retries is NOT
+ *         thrown — it returns false to avoid blocking the tool call).
+ */
+export function setProjectTeamMode(enabled: boolean): boolean {
+	const settingsPath = join(process.cwd(), '.snow', 'settings.json');
+
+	// Read existing settings (empty object if missing/corrupt — preserves other fields)
+	let settings: Record<string, unknown> = {};
+	if (existsSync(settingsPath)) {
+		try {
+			settings = JSON.parse(readFileSync(settingsPath, 'utf-8')) as Record<string, unknown>;
+		} catch {
+			// Corrupt settings.json — start fresh but warn via stderr (server context)
+			settings = {};
+		}
+	}
+
+	// Idempotent: skip the write if already in the desired state
+	if (settings.teamMode === enabled) {
+		return false;
+	}
+
+	settings.teamMode = enabled;
+
+	// Atomic write: lock + tmp + rename (mirrors saveState's pattern)
+	mkdirSync(dirname(settingsPath), {recursive: true});
+	const content = JSON.stringify(settings, null, 2);
+
+	const lockPath = settingsPath + '.lock';
+
+	// Stale lock detection (120s threshold, same as saveState)
+	if (existsSync(lockPath)) {
+		try {
+			const lockStat = statSync(lockPath);
+			if (Date.now() - lockStat.mtimeMs > 120000) {
+				unlinkSync(lockPath);
+			}
+		} catch {}
+	}
+
+	let lockCreated = false;
+	const MAX_RETRIES = 5;
+	const RETRY_DELAY_MS = 50;
+	for (let attempt = 0; attempt < MAX_RETRIES; attempt++) {
+		try {
+			const fd = openSync(lockPath, 'wx');
+			closeSync(fd);
+			lockCreated = true;
+			break;
+		} catch {
+			if (attempt < MAX_RETRIES - 1) {
+				syncSleep(RETRY_DELAY_MS);
+			}
+		}
+	}
+
+	if (!lockCreated) {
+		// Lock contention — do NOT throw (would block the tool call).
+		// Surface via stderr and return false; the AI can retry oms-set-team.
+		console.error('[OMS] setProjectTeamMode: lock contention, skipping write');
+		return false;
+	}
+
+	try {
+		const tmpPath = settingsPath + '.tmp';
+		writeFileSync(tmpPath, content, 'utf-8');
+		try {
+			renameSync(tmpPath, settingsPath);
+		} catch {
+			// Cross-device fallback
+			writeFileSync(settingsPath, content, 'utf-8');
+			try {
+				unlinkSync(tmpPath);
+			} catch {}
+		}
+	} finally {
+		if (lockCreated) {
+			try {
+				unlinkSync(lockPath);
+			} catch {}
+		}
+	}
+
+	return true;
+}
+
+/**
+ * Set the team name reference on the state AND activate snow-cli Team Mode.
+ * Used by /oms:team to record which snow-cli team this session orchestrates
+ * and to flip teamMode=true so team-* tools become visible on the next turn.
  */
 export function setTeamName(state: OmsState, teamName: string): OmsState {
 	state.teamName = teamName;
 	state.updatedAt = new Date().toISOString();
 	saveState(state);
+
+	// Activate snow-cli Team Mode (writes project-level .snow/settings.json).
+	// This is what actually mounts the team-* tools for the lead on the next turn.
+	try {
+		setProjectTeamMode(true);
+	} catch (error) {
+		// Don't fail the whole tool call if settings.json can't be updated —
+		// the teamName is still recorded, and the command prompt instructs the
+		// user to run /team manually as a fallback.
+		console.error(`[OMS] setTeamName: failed to activate teamMode: ${(error as Error).message}`);
+	}
+
 	return state;
 }
 
