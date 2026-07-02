@@ -38,10 +38,12 @@ import { getStateDir, loadState, saveState, detectVerifyCommand, readStdin, appe
 // transient) — only on SyntaxError (partial/corrupt JSON).
 
 function syncSleep(ms) {
-	// Non-blocking sleep via Atomics.wait when SharedArrayBuffer is available;
+	// Synchronous sleep via Atomics.wait when SharedArrayBuffer is available;
 	// falls back to a Date.now() spin (same primitive store.ts uses). This is a
-	// sync hook, so blocking the event loop for ~20ms is acceptable, but
-	// Atomics.wait yields the thread instead of burning CPU.
+	// sync hook, so blocking the event loop for ~20ms is acceptable. Note:
+	// Atomics.wait does NOT yield the JS thread (it's a sync block) — it parks
+	// the OS thread at the kernel level without burning CPU, which is cheaper
+	// than a Date.now() spin but still blocks the event loop for the duration.
 	try {
 		Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
 	} catch {

@@ -19,8 +19,9 @@ import {
 	openSync,
 	closeSync,
 	statSync,
+	readdirSync,
 } from 'fs';
-import {join, dirname} from 'path';
+import {join, dirname, basename} from 'path';
 
 // ── Types ──
 
@@ -135,6 +136,9 @@ export function loadState(): OmsState | null {
 }
 
 function syncSleep(ms: number): void {
+	// Synchronous sleep used for lock-retry backoff. Atomics.wait parks the OS
+	// thread (kernel-level, no CPU burn) when SharedArrayBuffer is available;
+	// it does NOT yield the JS event loop. Falls back to a Date.now() spin.
 	try {
 		Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
 	} catch {
@@ -175,7 +179,8 @@ function atomicWriteWithLock(
 	const lockPath = filePath + '.lock';
 
 	// Stale lock detection: force-remove locks older than STALE_LOCK_MS.
-	// 120s is intentionally generous — savePrd on a large state.json + slow disk
+	// 120s is intentionally generous — saveState on a large state.json or
+	// savePrd on a large prd.json + slow disk
 	// can take seconds, and force-removing a still-live lock would break mutual
 	// exclusion. Only locks held far past any legitimate write are reaped.
 	const STALE_LOCK_MS = 120000;
@@ -260,7 +265,12 @@ function atomicWriteWithLock(
  * Returns false on any unrecoverable write failure.
  */
 function tmpRenameWrite(filePath: string, content: string): boolean {
-	const tmpPath = filePath + '.tmp';
+	// PID-suffixed tmp path so two concurrent writers (locked holder + force
+	// fallback) don't collide on the same `prd.json.tmp` — the lock only
+	// serializes lock acquisition, not the tmp file itself. With per-pid
+	// names, each process writes its own tmp and the loser's rename either
+	// wins (last writer) or fails cleanly, but never corrupts the winner's tmp.
+	const tmpPath = `${filePath}.${process.pid}.tmp`;
 	try {
 		writeFileSync(tmpPath, content, 'utf-8');
 	} catch {
@@ -321,19 +331,17 @@ export function deleteState(): void {
 			unlinkSync(markerPath);
 		} catch {}
 	}
-	// Clean up lock and tmp files from saveState
-	const lockPath = filePath + '.lock';
-	if (existsSync(lockPath)) {
-		try {
-			unlinkSync(lockPath);
-		} catch {}
-	}
-	const tmpPath = filePath + '.tmp';
-	if (existsSync(tmpPath)) {
-		try {
-			unlinkSync(tmpPath);
-		} catch {}
-	}
+	// Clean up lock + tmp files from saveState (tmp is now PID-suffixed, so
+	// glob the dir for all `*.lock` and `*.tmp` variants rather than a fixed path).
+	const dir = dirname(filePath);
+	const base = basename(filePath);
+	try {
+		for (const name of readdirSync(dir)) {
+			if (name === `${base}.lock` || (name.startsWith(`${base}.`) && name.endsWith('.tmp'))) {
+				try { unlinkSync(join(dir, name)); } catch {}
+			}
+		}
+	} catch {}
 }
 
 // ── State mutations ──
@@ -567,6 +575,14 @@ export interface PrdStory {
 	acceptanceCriteria: AcceptanceCriterion[];
 	/** Whether ALL acceptance criteria are verified → story is complete */
 	passes: boolean;
+	/**
+	 * Whether this story has been EXPLICITLY rejected by a reviewer via
+	 * setPrdStoryPasses(id, false). Distinct from `passes: false` on a fresh
+	 * story (which means "not yet verified, may auto-lift on full verification"):
+	 * a `rejected` story must NOT auto-lift passes on re-verify — the agent has
+	 * to explicitly call mark-passes(true) to re-pass. Cleared by mark-passes(true).
+	 */
+	rejected: boolean;
 	/** Priority (lower = higher priority, foundational work first) */
 	priority: number;
 	/** When the story was created */
@@ -641,6 +657,11 @@ function savePrd(prd: Prd): void {
  * lock itself: the loser's 'skip' means it writes nothing, then re-reads the
  * file the winner wrote under the lock. loadPrd() before the write is just an
  * optimization to skip building the scaffold when a PRD already exists.
+ *
+ * On losing the lock race with no PRD on disk, init returns the in-memory
+ * scaffold WITHOUT force-writing it — force-writing could clobber a PRD the
+ * winner already refined in the gap or resurrect a state the user cleared via
+ * oms-stop. Persistence is deferred to the caller's next mutation (refinePrd).
  */
 export function initPrd(task: string): Prd {
 	const existing = loadPrd();
@@ -662,6 +683,7 @@ export function initPrd(task: string): Prd {
 					},
 				],
 				passes: false,
+				rejected: false,
 				priority: 1,
 				createdAt: now,
 				updatedAt: now,
@@ -685,10 +707,12 @@ export function initPrd(task: string): Prd {
 		if (theirs) {
 			return theirs;
 		}
-		// Truly lost the race AND no PRD on disk (the winner wrote then deleted?
-		// or we hit a transient lock failure). Fall back to a best-effort write
-		// so the caller still gets a PRD — better than returning an unsaved object.
-		atomicWriteWithLock(getPrdFilePath(), JSON.stringify(prd, null, 2), 'force');
+		// Lost the race AND no PRD on disk (winner wrote then deleted, or transient
+		// lock failure). Do NOT force-write our scaffold here — that could clobber
+		// a PRD the winner already refined in the gap, or resurrect a state the
+		// user explicitly cleared via oms-stop. Return the in-memory scaffold so
+		// the caller still has an object; if persistence is required, the caller's
+		// next mutation (refinePrd) will write under the lock and reconcile.
 	}
 	return prd;
 }
@@ -707,6 +731,11 @@ export interface RefinedStoryInput {
  * stale progress log from a prior task on the same state dir must not survive.
  * Without this, logProgress entries from task A would linger under a header
  * still naming task A while the PRD now describes task B.
+ *
+ * WARNING: refine REPLACES the entire stories array — any stories added via
+ * addPrdStory since the last init/refine are discarded (re-numbered to US-001..NNN
+ * from the passed array). If you need to keep added stories, append them to the
+ * stories array you pass to refine instead of relying on addPrdStory persistence.
  */
 export function refinePrd(
 	task: string,
@@ -716,18 +745,24 @@ export function refinePrd(
 	const taskToUse = task || existing?.task || '';
 	const now = new Date().toISOString();
 
-	const refinedStories: PrdStory[] = stories.map((s, i) => ({
-		id: `US-${String(i + 1).padStart(3, '0')}`,
-		title: s.title,
-		acceptanceCriteria: s.acceptanceCriteria.map(criterion => ({
-			criterion,
-			verified: false,
-		})),
-		passes: false,
-		priority: s.priority,
-		createdAt: now,
-		updatedAt: now,
-	}));
+	const refinedStories: PrdStory[] = stories.map((s, i) => {
+		if (!Number.isInteger(s.priority) || s.priority < 1) {
+			throw new Error(`Story ${i + 1} "${s.title}" has invalid priority ${s.priority}: must be a positive integer (>= 1).`);
+		}
+		return {
+			id: `US-${String(i + 1).padStart(3, '0')}`,
+			title: s.title,
+			acceptanceCriteria: s.acceptanceCriteria.map(criterion => ({
+				criterion,
+				verified: false,
+			})),
+			passes: false,
+			rejected: false,
+			priority: s.priority,
+			createdAt: now,
+			updatedAt: now,
+		};
+	});
 
 	const prd: Prd = {
 		task: taskToUse,
@@ -773,6 +808,7 @@ export function addPrdStory(
 			verified: false,
 		})),
 		passes: false,
+		rejected: false,
 		priority,
 		createdAt: now,
 		updatedAt: now,
@@ -823,6 +859,9 @@ export function getPrdStory(storyId: string): PrdStory | null {
  *     reviewer can reject at will). After unmark, verified flags stay true so a
  *     later mark-passes(true) re-passes without re-verifying — that's intended:
  *     evidence doesn't vanish just because the story was sent back for rework.
+ *
+ * Note: after a reject, verify-criterion will NOT auto-lift passes — an explicit
+ * mark-passes(true) is required to re-pass (see setCriterionVerified JSDoc).
  */
 export function setPrdStoryPasses(
 	storyId: string,
@@ -843,6 +882,11 @@ export function setPrdStoryPasses(
 		return null;
 	}
 	story.passes = passes;
+	// Track explicit rejection so setCriterionVerified can distinguish a fresh
+	// `passes: false` (not yet verified — auto-lift on full verification) from a
+	// rejected `passes: false` (reviewer veto — no auto-lift, explicit mark-passes
+	// required). mark-passes(true) clears the veto.
+	story.rejected = !passes;
 	story.updatedAt = new Date().toISOString();
 	savePrd(prd);
 	return story;
@@ -852,29 +896,24 @@ export function setPrdStoryPasses(
  * Mark a single acceptance criterion as verified/unverified.
  *
  * Passes derivation rule (asymmetric by design):
- *   - verify-criterion(idx, true)  → when the LAST criterion is verified, auto-lift
- *     passes=true (convenience: no need for a separate mark-passes call once all
- *     evidence is in). The mark-passes guard in setPrdStoryPasses is satisfied.
+ *   - verify-criterion(idx, true)  → when the LAST criterion is verified AND the
+ *     story has not been rejected (rejected flag is false), auto-lift passes=true.
+ *     This is a convenience so a fresh refine + full verification passes without
+ *     a separate mark-passes call.
  *   - verify-criterion(idx, false) → only clears that criterion's flag. It does
  *     NOT auto-drop passes — unmarking a story is the caller's explicit job via
  *     setPrdStoryPasses(id, false). This keeps responsibilities clean: this
  *     function owns criterion flags, setPrdStoryPasses owns the passes flag.
  *     Previously it set `passes = allVerified` on every call, which meant
- *     flipping one criterion to false silently unmarked the whole story —
- *     contradicting the setPrdStoryPasses JSDoc ("passes:false leaves verified
- *     flags as-is for re-verification") and surprising the agent.
+ *     flipping one criterion to false silently unmarked the whole story.
  *
- * Interaction with reviewer rejection (intended behavior):
+ * Interaction with reviewer rejection (veto semantics):
  *   After setPrdStoryPasses(id, false) rejects a story, the verified flags stay
- *   true (evidence doesn't vanish). If the agent then calls verify-criterion on
- *   ANY criterion with verified=true (e.g. re-confirming after a rework), the
- *   `verified && every()` condition re-lifts passes=true WITHOUT an explicit
- *   mark-passes(true). This is by design: a reviewer "打回" asks the agent to
- *   redo + re-verify, not to invalidate evidence. Re-verifying IS the rework
- *   confirmation, so the story legitimately re-passes. A reviewer who needs to
- *   permanently block a story should delete it or rewrite its criteria rather
- *   than rely on mark-passes(false) as a veto, since re-verification will lift
- *   passes again once all criteria hold.
+ *   true (evidence is preserved) BUT passes is now false, and re-verifying any
+ *   criterion does NOT auto-lift passes. The agent must explicitly call
+ *   mark-passes(true) to re-pass the story — a reviewer's rejection is a real
+ *   veto, not something a noop re-verify (verified=true on an already-true flag)
+ *   can override. To permanently block a story, delete it or rewrite its criteria.
  */
 export function setCriterionVerified(
 	storyId: string,
@@ -895,9 +934,14 @@ export function setCriterionVerified(
 	}
 	criterion.verified = verified;
 	story.updatedAt = new Date().toISOString();
-	// Only lift passes when all criteria are verified. Never drop passes here —
-	// dropping is setPrdStoryPasses(id, false)'s job (see JSDoc on this function).
-	if (verified && story.acceptanceCriteria.every(c => c.verified)) {
+	// Only lift passes when all criteria are verified AND the story hasn't been
+	// explicitly rejected (rejected flag set by setPrdStoryPasses(id, false)).
+	// After a reviewer rejects a story, re-verifying a criterion must NOT
+	// auto-lift passes — the agent has to explicitly call mark-passes(true) to
+	// re-pass, so a reviewer's rejection is a real veto rather than something a
+	// noop re-verify overrides. A fresh `passes: false` story has rejected=false,
+	// so it still auto-lifts on full verification (convenience for fresh refine).
+	if (verified && !story.rejected && story.acceptanceCriteria.every(c => c.verified)) {
 		story.passes = true;
 	}
 	savePrd(prd);
@@ -941,8 +985,8 @@ export function getPrdStatus(): {
  * Initialize progress.txt. Returns true if created, false if already exists.
  *
  * If no PRD exists yet (agent called init-progress before init), the header is
- * written with an empty task rather than a misleading "(unknown)" literal —
- * the next refinePrd deletes this file and rebuilds it with the real task.
+ * written with a visible '(no PRD yet)' marker so the empty header is diagnosable
+ * — the next refinePrd deletes this file and rebuilds it with the real task.
  */
 export function initProgress(): boolean {
 	const filePath = getProgressFilePath();
@@ -950,7 +994,7 @@ export function initProgress(): boolean {
 		return false;
 	}
 	ensureStateDir();
-	const task = loadPrd()?.task ?? '';
+	const task = loadPrd()?.task || '(no PRD yet)';
 	const header = `# Ralph Progress Log\n# Task: ${task}\n# Created: ${new Date().toISOString()}\n\n`;
 	writeFileSync(filePath, header, 'utf-8');
 	return true;
@@ -974,7 +1018,7 @@ export function logProgress(message: string): void {
 	const entry = `[${timestamp}] ${message}\n`;
 	try {
 		if (!existsSync(filePath)) {
-			const task = loadPrd()?.task ?? '';
+			const task = loadPrd()?.task || '(no PRD yet)';
 			const header = `# Ralph Progress Log\n# Task: ${task}\n# Created: ${timestamp}\n\n`;
 			writeFileSync(filePath, header, 'utf-8');
 		}
@@ -1023,13 +1067,14 @@ export function deletePrd(): void {
 			unlinkSync(progressPath);
 		} catch {}
 	}
-	// Clean up lock/tmp files
-	for (const ext of ['.lock', '.tmp']) {
-		const p = prdPath + ext;
-		if (existsSync(p)) {
-			try {
-				unlinkSync(p);
-			} catch {}
+	// Clean up lock + tmp files (tmp is now PID-suffixed, so glob the dir)
+	const dir = dirname(prdPath);
+	const base = basename(prdPath);
+	try {
+		for (const name of readdirSync(dir)) {
+			if (name === `${base}.lock` || (name.startsWith(`${base}.`) && name.endsWith('.tmp'))) {
+				try { unlinkSync(join(dir, name)); } catch {}
+			}
 		}
-	}
+	} catch {}
 }

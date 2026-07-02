@@ -844,7 +844,7 @@ server.registerTool(
 					z.object({
 						title: z.string(),
 						acceptanceCriteria: z.array(z.string()),
-						priority: z.number(),
+						priority: z.number().int().positive(),
 					}),
 				)
 				.optional()
@@ -863,17 +863,21 @@ server.registerTool(
 				),
 			priority: z
 				.number()
+				.int()
+				.positive()
 				.optional()
-				.describe('Story priority, lower = higher (for "add-story")'),
+				.describe('Story priority, lower = higher (for "add-story"); must be a positive integer'),
 			storyId: z
 				.string()
 				.optional()
 				.describe('Story id, e.g. "US-001" (for get-story / mark-passes / unmark-passes / verify-criterion)'),
 			criterionIndex: z
 				.number()
+				.int()
+				.nonnegative()
 				.optional()
 				.describe(
-					'Acceptance criterion index (0-based) — required for "verify-criterion"',
+					'Acceptance criterion index (0-based, non-negative integer) — required for "verify-criterion"',
 				),
 			verified: z
 				.boolean()
@@ -888,6 +892,30 @@ server.registerTool(
 		},
 	},
 	params => {
+		// Shared error-response builders for the pre-check boilerplate that
+		// mark-passes and verify-criterion both need. Centralizes the message
+		// format so the two cases stay consistent (DRY). The store-layer
+		// setPrdStoryPasses returns null without distinguishing "prd missing"
+		// vs "story missing" vs "guard refused", so the MCP layer must do its
+		// own loadPrd to give an accurate, actionable error to the agent.
+		const noPrdError = () => ({
+			content: [
+				{
+					type: 'text' as const,
+					text: 'Error: No active PRD. Call oms-prd with action: "init" first.',
+				},
+			],
+			isError: true as const,
+		});
+		const noStoryError = (storyId: string) => ({
+			content: [
+				{
+					type: 'text' as const,
+					text: `Error: No story found with id "${storyId}".`,
+				},
+			],
+			isError: true as const,
+		});
 		try {
 			switch (params.action) {
 				case 'init': {
@@ -950,15 +978,10 @@ server.registerTool(
 							isError: true,
 						};
 					}
-					// refine replaces the scaffold with task-specific stories. Refuse
-					// when the task name would end up empty — refinePrd derives
-					// taskToUse = task || existing?.task || '', and an empty task gets
-					// permanently embedded into the PRD and progress.txt headers
-					// (reading "# Task: " with no name). This covers two cases:
-					//   1. No PRD exists AND no task passed (refinePrd would create task='').
-					//   2. A PRD exists but its task is already '' (e.g. a prior
-					//      initProgress-before-init left an empty task) AND no task
-					//      passed — refine would preserve the empty task.
+					// Refuse early when the task name would end up empty — refinePrd would embed
+					// an empty task permanently into the PRD and progress.txt headers. Check here
+					// (MCP layer) for an actionable error message; the store layer also tolerates
+					// missing PRDs via implicit auto-init, so this guard is the agent's first line.
 					const existingPrd = loadPrd();
 					const effectiveTask = params.task || existingPrd?.task || '';
 					if (!effectiveTask) {
@@ -1138,29 +1161,13 @@ server.registerTool(
 					// actionable guidance instead of a generic "no story found".
 					const existingPrd = loadPrd();
 					if (!existingPrd) {
-						return {
-							content: [
-								{
-									type: 'text' as const,
-									text: 'Error: No active PRD. Call oms-prd with action: "init" first.',
-								},
-							],
-							isError: true,
-						};
+						return noPrdError();
 					}
 					const existingStory = existingPrd.stories.find(
 						s => s.id === params.storyId,
 					);
 					if (!existingStory) {
-						return {
-							content: [
-								{
-									type: 'text' as const,
-									text: `Error: No story found with id "${params.storyId}".`,
-								},
-							],
-							isError: true,
-						};
+						return noStoryError(params.storyId);
 					}
 					const story = setPrdStoryPasses(params.storyId, passes);
 					if (!story) {
@@ -1170,6 +1177,13 @@ server.registerTool(
 						// existingStory snapshot above may be stale if another tool call
 						// verified/unverified a criterion in the gap. setPrdStoryPasses
 						// does its own internal loadPrd, so match that by reading fresh.
+						//
+						// C7 root cause: this 3rd loadPrd exists because the store-layer
+						// setPrdStoryPasses returns null without distinguishing "guard
+						// refused" from "story missing". To give the agent an accurate
+						// verified/total count we must re-read the PRD here. Eliminating
+						// this read requires changing the store signature to return a
+						// structured result (deferred — out of scope for this change set).
 						const freshPrd = loadPrd();
 						const freshStory = freshPrd?.stories.find(
 							s => s.id === params.storyId,
@@ -1223,29 +1237,13 @@ server.registerTool(
 					// so the agent can correct the right argument.
 					const prd = loadPrd();
 					if (!prd) {
-						return {
-							content: [
-								{
-									type: 'text' as const,
-									text: 'Error: No active PRD. Call oms-prd with action: "init" first.',
-								},
-							],
-							isError: true,
-						};
+						return noPrdError();
 					}
 					const targetStory = prd.stories.find(
 						s => s.id === params.storyId,
 					);
 					if (!targetStory) {
-						return {
-							content: [
-								{
-									type: 'text' as const,
-									text: `Error: No story found with id "${params.storyId}".`,
-								},
-							],
-							isError: true,
-						};
+						return noStoryError(params.storyId);
 					}
 					if (
 						params.criterionIndex < 0 ||
@@ -1280,13 +1278,14 @@ server.registerTool(
 							isError: true,
 						};
 					}
+					const allVerified = story.acceptanceCriteria.every(c => c.verified);
 					return {
 						content: [
 							{
 								type: 'text' as const,
 								text:
 									`✅ Criterion ${params.criterionIndex} of ${story.id} verified=${params.verified}.\n` +
-									`Story passes (auto): ${story.passes} (all criteria verified = true)`,
+									`Story passes (auto): ${story.passes} (all criteria verified = ${allVerified})`,
 							},
 						],
 					};

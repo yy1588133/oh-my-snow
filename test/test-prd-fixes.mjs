@@ -4,6 +4,8 @@
 // 3. setCriterionVerified(false) drops passes but leaves other verified intact
 // 4. refinePrd deletes a stale progress.txt
 // 5. getPrdStatus doesn't mutate the loaded prd.stories order
+// 6. After mark-passes(false) rejects a story, verify-criterion does NOT
+//    auto-lift passes — agent must explicitly mark-passes(true) to re-pass.
 import {mkdtempSync, existsSync, writeFileSync, readFileSync} from 'fs';
 import {tmpdir} from 'os';
 import {join} from 'path';
@@ -115,18 +117,46 @@ ok('asym: explicit unmark leaves verified intact', afterMark.acceptanceCriteria.
 const reMarked = store.setPrdStoryPasses('US-001', true);
 ok('asym: re-mark after unmark succeeds (verified intact)', reMarked !== null && reMarked.passes === true);
 
-// Reviewer rejects again, then agent re-verifies a SINGLE criterion (already true)
-// → passes auto-lifts back to true WITHOUT an explicit mark-passes(true).
-// This is intended (see setCriterionVerified JSDoc): re-verifying IS the
-// rework confirmation, so the story legitimately re-passes. A reviewer who
-// needs a permanent veto should delete the story, not rely on mark-passes(false).
+// Reviewer rejects, then agent re-verifies a SINGLE criterion (already true).
+// NEW semantics (打回=永久否决): re-verify does NOT auto-lift passes.
+// The agent must explicitly call mark-passes(true) to re-pass the story.
+// This makes a reviewer's rejection a real veto, not something a noop re-verify
+// can override.
 store.setPrdStoryPasses('US-001', false);
 let afterReject = store.getPrdStory('US-001');
 ok('asym: reviewer reject drops passes', afterReject.passes === false);
 ok('asym: reviewer reject leaves verified intact', afterReject.acceptanceCriteria.every(c => c.verified));
 store.setCriterionVerified('US-001', 0, true); // re-confirm criterion 0 (already verified)
 let afterReverify = store.getPrdStory('US-001');
-ok('asym: re-verify after reject re-lifts passes (intended)', afterReverify.passes === true);
+ok('asym: re-verify after reject does NOT auto-lift passes (veto)', afterReverify.passes === false);
+ok('asym: re-verify still marks criterion verified', afterReverify.acceptanceCriteria[0].verified === true);
+
+// Agent must explicitly mark-passes(true) to re-pass — and it succeeds because
+// all criteria are still verified (evidence preserved across the reject).
+const reMarkedAfterReject = store.setPrdStoryPasses('US-001', true);
+ok('asym: explicit mark-passes(true) re-passes after reject', reMarkedAfterReject !== null && reMarkedAfterReject.passes === true);
+
+store.deletePrd();
+
+// ── FIX 7 (C14): refinePrd rejects non-positive / non-integer priority ──
+// refinePrd must throw BEFORE savePrd so a bad priority never lands on disk.
+// Covers: priority=0 (non-positive), priority=1.5 (non-integer), priority=-1.
+const expectThrow = (label, fn) => {
+	let threw = false;
+	try { fn(); } catch { threw = true; }
+	ok(label, threw);
+};
+store.initPrd('Priority validation test');
+expectThrow('C14: priority=0 throws', () => store.refinePrd('t', [{title: 'x', acceptanceCriteria: ['c'], priority: 0}]));
+expectThrow('C14: priority=1.5 throws', () => store.refinePrd('t', [{title: 'x', acceptanceCriteria: ['c'], priority: 1.5}]));
+expectThrow('C14: priority=-1 throws', () => store.refinePrd('t', [{title: 'x', acceptanceCriteria: ['c'], priority: -1}]));
+// PRD on disk should NOT have been overwritten by a failed refine — task stays as the init task.
+const afterBadRefine = store.loadPrd();
+ok('C14: failed refine does not corrupt PRD task', afterBadRefine && afterBadRefine.task === 'Priority validation test');
+ok('C14: failed refine does not write refined stories', afterBadRefine && afterBadRefine.refined === false);
+// A valid priority still works after the failed attempts.
+store.refinePrd('Priority validation test', [{title: 'ok', acceptanceCriteria: ['c'], priority: 1}]);
+ok('C14: valid priority=1 refines normally', store.loadPrd().refined === true);
 
 store.deletePrd();
 console.log(`\n${'='.repeat(50)}\nPRD fixes: ${pass} passed, ${fail} failed\n${'='.repeat(50)}`);
