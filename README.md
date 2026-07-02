@@ -13,9 +13,9 @@ OMS wraps Snow CLI with a state machine, stage enforcement, auto-verification, a
 - 🔍 **Text bypass detection** — If the AI claims to have made changes but `git diff` shows nothing, it gets called out
 - 📸 **Snapshots** — Save and restore session state for long-running tasks
 - 🎓 **Learning** — Extract reusable patterns from sessions into SKILL.md files
-- 🤖 **18 specialized sub-agents** — Architecture, security, testing, research, and more
+- 🤖 **18 specialized sub-agents** — Architecture, security, testing, research, and more, each with a structured `role` prompt ported from oh-my-claudecode (Role / Success Criteria / Constraints / Investigation Protocol / Final Checklist)
 - 📚 **10 skills** — Deep code analysis, execution tracing, cleanup, visual verification, and more
-- 🛠️ **9 commands** — Auto, plan, QA, goal, verify, release, save, stop, help
+- 🛠️ **20 commands** — 10 workflow commands (auto, plan, qa, goal, verify, release, save, stop, team, help) + 10 skill-mapping commands (interview, dive, trace, cleanup, vverify, wiki, research, darwin-skill, skill-evolver, embodi-skill)
 
 ## Installation
 
@@ -29,7 +29,7 @@ The `oms setup` command:
 1. Registers the MCP server in `~/.snow/settings.json`
 2. Merges 18 sub-agents into `~/.snow/sub-agents.json`
 3. Copies 10 skills to `~/.snow/skills/oms/`
-4. Copies 9 commands to `~/.snow/commands/oms/`
+4. Copies 20 commands to `~/.snow/commands/oms/` (10 workflow + 10 skill mappings)
 5. Installs 4 hook configs to `~/.snow/hooks/` (global, with absolute path commands pointing to the npm package)
 6. Creates `<project>/.snow/oms-state/` for session state (auto-created per project at runtime)
 
@@ -105,6 +105,23 @@ planning → executing → verifying → done
 | `/oms:stop`               | Stop the active OMS session                                                                    |
 | `/oms:help`               | Show the full OMS usage guide                                                                  |
 
+### Skill-Mapping Commands
+
+Each maps to a skill via the `skill-execute` tool — equivalent to `/skill oms/<name>` but with an OMS-namespaced entry point:
+
+| Command                    | Skill            | Description                                                          |
+| -------------------------- | ---------------- | -------------------------------------------------------------------- |
+| `/oms:interview <desc>`    | `oms/interview`  | Socratic requirement clarification through iterative questioning     |
+| `/oms:dive <target>`       | `oms/dive`       | Deep code analysis: structure → dependencies → data flow → risks     |
+| `/oms:trace <target>`      | `oms/trace`      | Execution tracing: call chain tracing + state change recording        |
+| `/oms:cleanup <target>`    | `oms/cleanup`    | Detect and clean up AI-generated redundant or low-quality code       |
+| `/oms:vverify <target>`    | `oms/vverify`    | Visual verification: UI screenshot comparison + visual consistency   |
+| `/oms:wiki <target>`       | `oms/wiki`       | Auto-generate wiki documentation from source code analysis           |
+| `/oms:research <question>` | `oms/research`   | Autonomous multi-step research combining web search and code analysis |
+| `/oms:darwin-skill <name>` | `oms/darwin-skill` | Evaluate skills across 9 dimensions + ratchet mechanism           |
+| `/oms:skill-evolver <t>`   | `oms/skill-evolver` | Skill lifecycle — author, deploy, test, refine skills            |
+| `/oms:embodi-skill <t>`    | `oms/embodi-skill`  | Skill-aware reflection from execution trajectories               |
+
 ## MCP Tools
 
 | Tool                | Description                                                                                          |
@@ -121,7 +138,7 @@ planning → executing → verifying → done
 
 ## Skills
 
-Load a skill with `/skill <name>`:
+Load a skill with `/skill oms/<name>`, or use the corresponding `/oms:<name>` command (see the Skill-Mapping Commands section above) for a namespaced entry point:
 
 | Skill           | Description                                                                      |
 | --------------- | -------------------------------------------------------------------------------- |
@@ -138,7 +155,13 @@ Load a skill with `/skill <name>`:
 
 ## Sub-Agents
 
-Spawn a sub-agent with `#oms_<agent_name>`:
+Spawn a sub-agent with `#oms_<agent_name>`.
+
+Each agent ships with a structured `role` prompt adapted from [oh-my-claudecode](https://github.com/anthropics/claude-code)'s agent definitions — not a one-line description. The prompt follows a consistent tag structure: `<Role>` (responsibilities + handoff boundaries), `<Why_This_Matters>` (the rule's rationale), `<Success_Criteria>` (verifiable outcomes), `<Constraints>` (hard rules, e.g. read-only agents cannot edit), `<Investigation_Protocol>` (step-by-step method), `<Tool_Usage>` (snow-cli tool mapping + external consultation), `<Failure_Modes_To_Avoid>`, and `<Final_Checklist>`. Every agent also declares a `<Final_Response_Contract>` requiring a structured deliverable in its last message — no content-free "done" sign-offs.
+
+**Mapping to omc roles**: `oms_architect`→architect, `oms_reviewer`→code-reviewer, `oms_tester`→test-engineer, `oms_security`→security-reviewer, `oms_ds`→scientist, `oms_docs`→writer, `oms_evaluator`→verifier, `oms_critic`→critic, `oms_designer`→designer, `oms_researcher`→explore+scientist+document-specialist. The role-specialized agents (`oms_frontend`, `oms_backend`, `oms_database`, `oms_api`, `oms_devops`, `oms_optimizer`, `oms_migrator`, `oms_summarizer`) use the executor pattern with domain-specific protocols.
+
+Tool names and collaboration references are adapted to snow-cli: `Glob/Grep/Read`→`filesystem-read`+`ace-search`, `Write/Edit`→`filesystem-create/edit/replaceedit`, `Bash`→`terminal-execute`, `lsp_diagnostics*`→`ide-get_diagnostics`, `Task(subagent_type=...)`→`#oms_<name>`, `/team`→`/oms:team`.
 
 | Agent            | Specialization                                             | Tools                                                           |
 | ---------------- | ---------------------------------------------------------- | --------------------------------------------------------------- |
@@ -272,7 +295,7 @@ oh-my-snow/
 │       └── oms-state.mjs      # Shared utilities (state I/O, lock, verify detection)
 ├── assets/
 │   ├── agents/
-│   │   └── sub-agents.json    # 18 sub-agent definitions
+│   │   └── sub-agents.json    # 18 sub-agent definitions (structured `role` prompts)
 │   ├── skills/
 │   │   └── oms/
 │   │       ├── interview/SKILL.md

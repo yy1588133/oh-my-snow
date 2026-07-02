@@ -1,0 +1,7 @@
+{
+  "name": "oms:interview",
+  "command": "Load the \"interview\" skill by calling the `skill-execute` tool with `{ \"skill\": \"oms/interview\" }`, then follow the skill's SKILL.md instructions to conduct a Socratic interview that clarifies the user's requirements through iterative questioning.\n\n## Context\n\n{{args}}",
+  "type": "prompt",
+  "description": "苏格拉底式需求澄清访谈，通过迭代提问帮用户明确需求。用法: /oms:interview <需求描述>",
+  "argsHint": "<需求描述>"
+}

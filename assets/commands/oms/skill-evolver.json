@@ -1,0 +1,7 @@
+{
+  "name": "oms:skill-evolver",
+  "command": "Load the \"skill-evolver\" skill by calling the `skill-execute` tool with `{ \"skill\": \"oms/skill-evolver\" }`, then follow the skill's SKILL.md instructions to manage the skill lifecycle — author, deploy, test, and refine skills through strategy-diversified exploration — for the target below.\n\n## Target\n\n{{args}}",
+  "type": "prompt",
+  "description": "技能生命周期管理，编写、部署、测试、改进技能。用法: /oms:skill-evolver <目标技能/目标>",
+  "argsHint": "<目标技能/目标>"
+}

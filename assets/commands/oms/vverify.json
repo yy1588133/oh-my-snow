@@ -1,0 +1,7 @@
+{
+  "name": "oms:vverify",
+  "command": "Load the \"vverify\" skill by calling the `skill-execute` tool with `{ \"skill\": \"oms/vverify\" }`, then follow the skill's SKILL.md instructions to verify UI changes through visual comparison and consistency checking for the target below.\n\n## Target\n\n{{args}}",
+  "type": "prompt",
+  "description": "可视化验证，通过 UI 截图对比与一致性检查验证变更。用法: /oms:vverify <目标页面/组件>",
+  "argsHint": "<目标页面/组件>"
+}

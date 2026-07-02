@@ -1,0 +1,7 @@
+{
+  "name": "oms:wiki",
+  "command": "Load the \"wiki\" skill by calling the `skill-execute` tool with `{ \"skill\": \"oms/wiki\" }`, then follow the skill's SKILL.md instructions to automatically generate wiki documentation from source code analysis for the target below.\n\n## Target\n\n{{args}}",
+  "type": "prompt",
+  "description": "从源代码自动生成 wiki 文档。用法: /oms:wiki <目标文件/模块/目录>",
+  "argsHint": "<目标文件/模块/目录>"
+}

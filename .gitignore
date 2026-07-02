@@ -7,6 +7,15 @@ dist/
 # OMS runtime state (never commit)
 .snow/
 
+# OMC orchestration runtime artifacts (sessions, state, logs, handoffs, research).
+# Match .omc/ at ANY depth (root or nested, e.g. assets/.../.omc/) — these are
+# runtime-generated and must never be committed.
+# NOTE: .omc/skills/** is the intentional committable exception (project-scoped skills).
+**/.omc/
+!/.omc/skills/
+/.omc/skills/*
+!/.omc/skills/**/
+
 # Test artifacts
 *.state.json
 

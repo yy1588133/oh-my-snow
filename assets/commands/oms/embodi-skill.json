@@ -1,0 +1,7 @@
+{
+  "name": "oms:embodi-skill",
+  "command": "Load the \"embodi-skill\" skill by calling the `skill-execute` tool with `{ \"skill\": \"oms/embodi-skill\" }`, then follow the skill's SKILL.md instructions to perform skill-aware reflection — analyze execution trajectories against the current skill to produce targeted revision signals for the target below.\n\n## Target\n\n{{args}}",
+  "type": "prompt",
+  "description": "技能反思，从执行轨迹提取针对性修订信号。用法: /oms:embodi-skill <目标技能/轨迹>",
+  "argsHint": "<目标技能/轨迹>"
+}

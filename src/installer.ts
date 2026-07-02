@@ -632,7 +632,7 @@ ${c.bold('Setup details:')}
   • Registers MCP server in ~/.snow/settings.json
   • Merges 18 sub-agents into ~/.snow/sub-agents.json
   • Copies 10 skills to ~/.snow/skills/oms/
-  • Copies 9 commands to ~/.snow/commands/oms/
+  • Copies 20 commands to ~/.snow/commands/oms/ (10 workflow + 10 skill mappings)
   • Installs 4 hook configs to ~/.snow/hooks/ (global, with absolute path commands)
   • Creates <project>/.snow/oms-state/ for session state (auto-created per project at runtime)
 

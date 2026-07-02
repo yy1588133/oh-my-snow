@@ -1,0 +1,7 @@
+{
+  "name": "oms:research",
+  "command": "Load the \"research\" skill by calling the `skill-execute` tool with `{ \"skill\": \"oms/research\" }`, then follow the skill's SKILL.md instructions to conduct autonomous multi-step research combining web search and code analysis for the question below.\n\n## Research Question\n\n{{args}}",
+  "type": "prompt",
+  "description": "自主多步研究，结合网络搜索与代码分析。用法: /oms:research <研究问题>",
+  "argsHint": "<研究问题>"
+}

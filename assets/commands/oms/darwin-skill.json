@@ -1,0 +1,7 @@
+{
+  "name": "oms:darwin-skill",
+  "command": "Load the \"darwin-skill\" skill by calling the `skill-execute` tool with `{ \"skill\": \"oms/darwin-skill\" }`, then follow the skill's SKILL.md instructions to evaluate skills across 9 dimensions and apply a ratchet mechanism (only keep improvements, never regress) for the target below.\n\n## Target Skill\n\n{{args}}",
+  "type": "prompt",
+  "description": "跨 9 维度评估技能并应用棘轮机制（只保留进步）。用法: /oms:darwin-skill <目标技能名>",
+  "argsHint": "<目标技能名>"
+}
