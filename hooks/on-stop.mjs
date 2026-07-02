@@ -7,6 +7,8 @@
  * 1. Reads OMS state and increments turn count
  * 2. Runs `git diff --stat` to detect actual file changes
  * 3. Injects continuation prompt based on stage + diff results
+ * 4. Runs build/test verification (marker-driven for executing/done,
+ *    unconditional for verifying — see runVerification)
  *
  * Exit code 2+ = inject user message + continue conversation (drive the loop)
  * Exit code 0 = no injection, conversation ends
@@ -43,6 +45,7 @@ function buildContinuationPrompt(state, gitDiff) {
 	const goal = state.goal;
 	const tasks = state.tasks;
 	const completedTasks = tasks.filter((t) => t.completed);
+	const inTeamMode = !!state.teamName;
 
 	let diffSection = '';
 	if (gitDiff == null) {
@@ -59,6 +62,26 @@ function buildContinuationPrompt(state, gitDiff) {
 
 	switch (stage) {
 		case 'planning': {
+			if (inTeamMode) {
+				// Team mode: lead plans locally, does NOT spawn yet (delayed spawn).
+				// IMPORTANT: use oms-add-task (OMS local tasks) — NOT team-create_task.
+				// snow-cli's team-create_task requires an active team, which only exists
+				// after the first team-spawn_teammate runs (team.ts:560-566 throws otherwise).
+				// Since OMS blocks spawn in planning, calling team-create_task here would deadlock.
+				// Tasks migrate to team-create_task in the executing stage (after first spawn).
+				return `[OMS:CONTINUE] Planning (Team Lead) — Turn ${turn}
+Goal: ${goal}
+${diffSection}
+You are the TEAM LEAD in the planning stage. Delayed spawn is in effect.
+
+Do NOT spawn teammates yet — planning stage blocks team-spawn_teammate.
+1. Analyze the task and split it into N independent work items
+2. Use \`oms-add-task\` to record the task list (OMS local tasks — for your own tracking; teammates cannot see these yet)
+   - Do NOT call team-create_task in planning — it requires an active team (created by the first spawn), which doesn't exist yet
+3. When the plan is complete, call oms-set-stage { stage: "executing" }
+
+In executing stage you will: spawn the FIRST teammate (creates the team) → use team-create_task to publish the planned tasks → spawn the remaining N-1 teammates (each claims a task and works in its own worktree).`;
+			}
 			const taskList = tasks.length > 0
 				? tasks.map((t) => `  [${t.completed ? '✓' : '○'}] ${t.id}: ${t.description}`).join('\n')
 				: '  (no tasks yet)';
@@ -73,6 +96,23 @@ When the plan is complete, call oms-set-stage { stage: "executing" } to start im
 		}
 
 		case 'executing': {
+			if (inTeamMode) {
+				// Team mode: lead spawns teammates + drives standby teammates via messages
+				return `[OMS:CONTINUE] Executing (Team Lead) — Turn ${turn}
+Goal: ${goal}
+${diffSection}
+You are the TEAM LEAD in the executing stage. Spawn teammates now.
+
+1. Call \`team-spawn_teammate\` N times (one per work item) — each gets a name, role, prompt
+2. Each teammate will claim a task and work in its own isolated git worktree
+3. Teammates that finish their work enter STANDBY (blocked on wait_for_messages)
+   - To give them more work: \`team-message_teammate\` with a new task
+   - To end them: \`team-shutdown_teammate\` (the ONLY way to terminate a teammate)
+4. When all teammates are done, call oms-set-stage { stage: "verifying" }
+
+Note: teammates do NOT trigger onStop — they run on a message-pump loop, not the turn loop.
+Drive standby teammates yourself via message_teammate.`;
+			}
 			const taskList = tasks
 				.map((t) => `  [${t.completed ? '✓' : '○'}] ${t.id}: ${t.description}`)
 				.join('\n');
@@ -88,25 +128,40 @@ When all tasks are complete, call oms-set-stage { stage: "verifying" }.`;
 		}
 
 		case 'verifying': {
+			if (inTeamMode) {
+				// Team mode: lead merges all teammate work + verification ran unconditionally by runVerification
+				return `[OMS:CONTINUE] Verifying (Team Lead) — Turn ${turn}
+Goal: ${goal}
+${diffSection}
+You are the TEAM LEAD in the verifying stage. Merge teammate work.
+
+1. Call \`team-merge_all_teammate_work\` to serially merge all teammate branches
+   - On conflict: snow-cli AI resolves it (manual/theirs/ours/auto)
+2. Verification (build/test) runs AUTOMATICALLY after this turn (see build result below)
+   - If build failed: call oms-set-stage { stage: "executing" } to fix (lead self-fix or re-spawn)
+   - If build passed: call oms-set-stage { stage: "done" }
+3. Before re-spawning teammates after a failed verify: check worktree state
+   - If cleanup_team already ran: re-spawn creates fresh worktrees
+   - If not: createTeamWorktree reuses old worktree — clean dirty changes with git checkout first
+
+Note: teammate-side verification is ineffective (teammates don't run onStop).
+Lead-side onStop is the single source of verification truth.`;
+			}
 			return `[OMS:CONTINUE] Verifying — Turn ${turn}
 Goal: ${goal}
 ${diffSection}
 Review the changes above.
-- If issues are found, call oms-set-stage { stage: "fixing" }
+- If issues are found, call oms-set-stage { stage: "executing" } to fix them
 - If everything passes, call oms-set-stage { stage: "done" }`;
 		}
 
-		case 'fixing': {
-			return `[OMS:CONTINUE] Fixing — Turn ${turn}
-Goal: ${goal}
-${diffSection}
-Continue fixing the issues.
-- Use filesystem-* tools to make corrections
-- When fixes are done, call oms-set-stage { stage: "verifying" }`;
-		}
-
 		case 'done':
-			// Session is complete — don't continue
+			// Session is complete — don't continue (unless build failed → force-transition handled below)
+			if (inTeamMode) {
+				return `[OMS:CONTINUE] Done (Team Lead) — Turn ${turn}
+Goal: ${goal}
+Team work complete. Call \`team-cleanup_team\` to reclaim all worktrees + branches.`;
+			}
 			return null;
 
 		default:
@@ -118,13 +173,81 @@ Continue fixing the issues.
 
 function checkTextBypass(state, gitDiff) {
 	// If the AI claims to have made changes but git diff shows nothing,
-	// and we're in executing/fixing stage, warn the AI
-	if ((state.stage === 'executing' || state.stage === 'fixing') && state.turnCount > 1) {
+	// and we're in executing stage, warn the AI.
+	if (state.stage === 'executing' && state.turnCount > 1) {
 		if (gitDiff != null && gitDiff.length === 0) {
 			return true; // Bypass detected
 		}
 	}
 	return false;
+}
+
+// ── Verification (extracted, addresses two team-mode hazards) ──
+//
+// Hazards fixed:
+//   - Original logic was wrapped in `if (existsSync(markerPath))`, so the
+//     verifying stage (which never writes the marker — afterToolCall's
+//     VERIFY_STAGES excludes 'verifying') would skip verification entirely.
+//     Fix: runVerification is called UNCONDITIONALLY for 'verifying'.
+//   - detectVerifyCommand() can return null (no build system detected).
+//     Original `if (verifyCmd)` silently passed — a false "verified OK".
+//     Fix: null is surfaced as an explicit "cannot auto-verify" prompt.
+
+/**
+ * Run build/test verification.
+ * @param {object} state - OMS state
+ * @returns {string} buildErrorPrefix — non-empty if verification ran and FAILED,
+ *   or if no verify command could be detected (null fallback). Empty on success.
+ */
+function runVerification(state) {
+	const markerPath = join(getStateDir(), '.pending-verify');
+	const markerExists = existsSync(markerPath);
+
+	const verifyCmd = detectVerifyCommand(state);
+
+	// Null fallback: no build system / verify command detected.
+	// Do NOT silently pass — surface it so the lead knows it can't auto-verify.
+	if (!verifyCmd) {
+		// Clean up marker if present (don't leave it dangling)
+		if (markerExists) {
+			try { unlinkSync(markerPath); } catch {}
+		}
+		return `[OMS:VERIFY] No build/test command detected for this project (detectVerifyCommand returned null).\n` +
+			`Cannot auto-verify ${state.stage === 'verifying' ? 'merged code' : 'edits'}. Manual verification required.\n\n` +
+			`Either:\n` +
+			`  - Run your tests manually to confirm, OR\n` +
+			`  - Call oms-start with an explicit verifyCommand (e.g. "npm test") and retry\n\n`;
+	}
+
+	let buildErrorPrefix = '';
+
+	// Execute the verify command (always — caller decides whether to invoke us)
+	try {
+		execSync(verifyCmd, {
+			cwd: process.cwd(),
+			encoding: 'utf-8',
+			timeout: 110000,
+			stdio: ['pipe', 'pipe', 'pipe'],
+		});
+		// Build succeeded — no error prefix
+	} catch (error) {
+		const buildError = error.stderr || error.stdout || error.message || 'Unknown build error';
+		const truncated = buildError.length > 2000 ? '...\n' + buildError.slice(-2000) : buildError;
+		buildErrorPrefix =
+			`[OMS:BUILD FAILED] Auto-verification command: "${verifyCmd}"\n\n` +
+			`The build/test check failed after your edits.\n` +
+			`You must fix the build errors before proceeding.\n\n` +
+			`Build output:\n${truncated}\n\n` +
+			`Fix the errors above.\n` +
+			`If you're in the "verifying" stage, switch back to executing: oms-set-stage { stage: "executing" }\n\n`;
+	}
+
+	// Clean up marker (always, even on failure)
+	if (markerExists) {
+		try { unlinkSync(markerPath); } catch {}
+	}
+
+	return buildErrorPrefix;
 }
 
 // ── Main ──
@@ -139,48 +262,24 @@ async function main() {
 		process.exit(0);
 	}
 
-	// Build error prefix (populated if pending-verify marker triggers a failed build)
+	// Build error prefix (populated if verification fails or no verify command)
 	let buildErrorPrefix = '';
 
-	// Run build verification if .pending-verify marker exists (set by afterToolCall).
-	// The marker means "a file was edited and needs verification" — this must run
-	// regardless of current stage, including 'done' (the AI may have rushed to done
-	// in the same turn as an edit).
-	const markerPath = join(getStateDir(), '.pending-verify');
-	if (existsSync(markerPath)) {
-		// Run verification, then clean up marker
-		try {
-			const verifyCmd = detectVerifyCommand(state);
-			if (verifyCmd) {
-				try {
-					execSync(verifyCmd, {
-						cwd: process.cwd(),
-						encoding: 'utf-8',
-						timeout: 110000,
-						stdio: ['pipe', 'pipe', 'pipe'],
-					});
-					// Build succeeded — no error prefix
-				} catch (error) {
-					// Build failed — prepend build error to continuation prompt
-					const buildError = error.stderr || error.stdout || error.message || 'Unknown build error';
-					const truncated = buildError.length > 2000 ? '...\n' + buildError.slice(-2000) : buildError;
-					buildErrorPrefix =
-						`[OMS:BUILD FAILED] Auto-verification command: "${verifyCmd}"\n\n` +
-						`The build/test check failed after your edits.\n` +
-						`You must fix the build errors before proceeding.\n\n` +
-						`Build output:\n${truncated}\n\n` +
-						`Fix the errors above.\n` +
-						`If you're in the "verifying" stage, switch to "fixing": oms-set-stage { stage: "fixing" }\n\n`;
-				}
-			}
-		} finally {
-			// Always remove the marker, even on failure
-			try { unlinkSync(markerPath); } catch {}
+	// Verification dispatch: verifying runs unconditionally (beforeToolCall blocks
+	// edits in verifying → afterToolCall never writes the marker → marker-gated
+	// check would skip merged code). executing/done stay marker-driven. See runVerification.
+	if (state.stage === 'verifying') {
+		buildErrorPrefix = runVerification(state);
+	} else {
+		// Marker-driven (original path) — only runs when afterToolCall wrote the marker
+		const markerPath = join(getStateDir(), '.pending-verify');
+		if (existsSync(markerPath)) {
+			buildErrorPrefix = runVerification(state);
 		}
 	}
 
-	// If session is done and build succeeded, end the conversation.
-	// (done + build failure falls through to turn count increment + stage transition below)
+	// If session is done and build succeeded (no error prefix), end the conversation.
+	// (done + build failure falls through to force-transition below)
 	if (state.stage === 'done' && !buildErrorPrefix) {
 		process.exit(0);
 	}
@@ -191,12 +290,12 @@ async function main() {
 	state.turnCount = (state.turnCount || 0) + 1;
 	state.updatedAt = new Date().toISOString();
 
-	// 2. If done + build failure: force-transition to fixing (mutates only, no save)
+	// 2. If done + build failure: force-transition to executing so the AI can fix.
 	//    Use a flag to track whether force-transition actually occurred,
-	//    so we don't falsely show "STAGE TRANSITION" when already in 'fixing'.
+	//    so we don't falsely show "STAGE TRANSITION" when already in 'executing'.
 	const forceTransitioned = (state.stage === 'done' && buildErrorPrefix);
 	if (forceTransitioned) {
-		forceSetStage(state, 'fixing');
+		forceSetStage(state, 'executing');
 	}
 
 	// 3. Single saveState call (covers both normal and force-transition paths)
@@ -205,7 +304,7 @@ async function main() {
 	// 4. If force-transitioned: inject transition message and exit
 	if (forceTransitioned) {
 		buildErrorPrefix =
-			`[OMS:STAGE TRANSITION] done → fixing — you can now edit files to fix the build errors.\n\n` +
+			`[OMS:STAGE TRANSITION] done → executing — you can now edit files to fix the build errors.\n\n` +
 			buildErrorPrefix;
 		process.stderr.write(buildErrorPrefix);
 		process.exit(2);

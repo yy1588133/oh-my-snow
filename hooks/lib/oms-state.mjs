@@ -187,7 +187,7 @@ export function saveState(state) {
  * Force-transition to a new stage WITHOUT validation and WITHOUT saving.
  * The caller is responsible for calling saveState() after all mutations are done.
  * This bypasses VALID_TRANSITIONS — use only for exceptional force-transitions
- * (e.g., done → fixing when build fails after an edit).
+ * (e.g., done → executing when build fails after an edit).
  */
 export function forceSetStage(state, newStage) {
 	state.stage = newStage;

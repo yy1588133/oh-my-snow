@@ -111,9 +111,21 @@ async function runTests() {
 	const r10 = await waitForResponse(12);
 	assert('oms-set-stage verifying→done', r10?.result?.content?.[0]?.text?.includes('done'), JSON.stringify(r10).slice(0, 200));
 
+	// Tool: oms-set-team (US-002/003 — records team name reference for /oms:team multi-agent mode)
+	// Note: state is 'done' here, but oms-set-team only mutates teamName (no stage transition) so it works in any stage.
+	send('tools/call', { name: 'oms-set-team', arguments: { teamName: 'refactor-utils' } });
+	const r10b = await waitForResponse(13);
+	assert('oms-set-team returns success', r10b?.result?.content?.[0]?.text?.includes('Team name set'), JSON.stringify(r10b).slice(0, 200));
+	assert('oms-set-team mentions team name', r10b?.result?.content?.[0]?.text?.includes('refactor-utils'), JSON.stringify(r10b).slice(0, 200));
+
+	// Tool: oms-get-state should now show the teamName
+	send('tools/call', { name: 'oms-get-state', arguments: {} });
+	const r10c = await waitForResponse(14);
+	assert('oms-get-state shows teamName', r10c?.result?.content?.[0]?.text?.includes('Team:') && r10c?.result?.content?.[0]?.text?.includes('refactor-utils'), JSON.stringify(r10c).slice(0, 300));
+
 	// Tool: oms-stop
 	send('tools/call', { name: 'oms-stop', arguments: {} });
-	const r11 = await waitForResponse(13);
+	const r11 = await waitForResponse(15);
 	assert('oms-stop ends session', r11?.result?.content?.[0]?.text?.includes('stopped'), JSON.stringify(r11).slice(0, 200));
 
 	console.log(`\n${'='.repeat(50)}`);

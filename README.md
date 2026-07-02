@@ -8,7 +8,7 @@ OMS wraps Snow CLI with a state machine, stage enforcement, auto-verification, a
 
 - 🔄 **Autonomous orchestration loop** — AI plans, executes, verifies, fixes, and completes work automatically
 - 🚦 **Stage enforcement** — File edits are blocked during planning/verifying/done stages; the AI can't cheat the workflow
-- 🔨 **Auto-verification** — Build/test runs automatically after every file edit during execution/fixing stages
+- 🔨 **Auto-verification** — Build/test runs automatically after every file edit during execution stage
 - 📝 **Structured planning** — Tasks are tracked with completion status; the AI knows exactly what's left
 - 🔍 **Text bypass detection** — If the AI claims to have made changes but `git diff` shows nothing, it gets called out
 - 📸 **Snapshots** — Save and restore session state for long-running tasks
@@ -30,13 +30,12 @@ The `oms setup` command:
 2. Merges 18 sub-agents into `~/.snow/sub-agents.json`
 3. Copies 10 skills to `~/.snow/skills/oms/`
 4. Copies 9 commands to `~/.snow/commands/oms/`
-5. Copies 4 hook scripts + shared lib to `<project>/.snow/oms-state/`
-6. Merges 4 hook configs into `<project>/.snow/hooks/`
-7. Creates `<project>/.snow/oms-state/` for session state
+5. Installs 4 hook configs to `~/.snow/hooks/` (global, with absolute path commands pointing to the npm package)
+6. Creates `<project>/.snow/oms-state/` for session state (auto-created per project at runtime)
 
-> **Note**: Run `oms setup` from your project directory so hooks are installed in the correct location.
+> **Note**: `oms setup` can be run from any directory — all components are installed globally. The `.snow/oms-state/` directory is auto-created in each project at runtime when an OMS session starts.
 
-> **Note**: Hook commands use forward slashes in paths (e.g., `.snow/oms-state/before-tool-call.mjs`), which is supported by Node.js on all platforms including Windows. If you encounter path issues on Windows, please report them.
+> **Note**: Hook commands use absolute paths to the npm package's `hooks/` directory (e.g., `node "/usr/local/lib/node_modules/oh-my-snow/hooks/before-tool-call.mjs"`), which is cross-platform compatible.
 
 ## Quick Start
 
@@ -69,7 +68,7 @@ Shell scripts triggered by Snow CLI at specific lifecycle events:
 | Hook             | Trigger                   | Purpose                                                                              |
 | ---------------- | ------------------------- | ------------------------------------------------------------------------------------ |
 | `beforeToolCall` | Before any tool executes  | Blocks file edits in non-editing stages (planning, verifying, done)                  |
-| `afterToolCall`  | After a tool completes    | Schedules build/test verification after file edits in executing/fixing stages        |
+| `afterToolCall`  | After a tool completes    | Schedules build/test verification after file edits in executing stage                |
 | `onUserMessage`  | When user sends a message | Injects stage-aware guidance into the conversation                                   |
 | `onStop`         | When AI finishes a turn   | Drives the orchestration loop — injects continuation prompts and detects text bypass |
 
@@ -77,8 +76,9 @@ Shell scripts triggered by Snow CLI at specific lifecycle events:
 
 ```
 planning → executing → verifying → done
-                ↑             ↓
-                ←── fixing ←──┘
+             ▲           │
+             └───────────┘
+               (verify fail → back to executing, no fixing middle stage)
 ```
 
 | Stage       | Description                           | File Edits                     |
@@ -86,35 +86,38 @@ planning → executing → verifying → done
 | `planning`  | Analyze codebase, create tasks        | ❌ Blocked                     |
 | `executing` | Implement tasks with filesystem tools | ✅ Allowed (auto-verify after) |
 | `verifying` | Review changes, run build/test        | ❌ Blocked                     |
-| `fixing`    | Fix issues found during verification  | ✅ Allowed (auto-verify after) |
 | `done`      | Session complete                      | ❌ Blocked                     |
+
+> **Note**: There is no `fixing` stage. When verification fails, the state transitions back to `executing` so the AI can fix issues and re-verify. A `done`-stage build failure also force-transitions to `executing`.
 
 ## Commands
 
-| Command                   | Description                                                                  |
-| ------------------------- | ---------------------------------------------------------------------------- |
-| `/oms:auto <goal>`        | Start autonomous orchestration — plan, execute, verify, fix, done            |
-| `/oms:plan <goal>`        | Iterative planning with consensus — analyze, create tasks, discuss with user |
-| `/oms:qa <context>`       | QA loop — diagnose issues, fix them, run build/test until clean              |
-| `/oms:goal <description>` | Generate a structured goal artifact with scope and success criteria          |
-| `/oms:verify <context>`   | Manual verification — review changes and run build/test                      |
-| `/oms:release <context>`  | Release flow — version bump, changelog, git tag                              |
-| `/oms:save <context>`     | Save session memory — snapshot state and extract reusable patterns           |
-| `/oms:stop`               | Stop the active OMS session                                                  |
-| `/oms:help`               | Show the full OMS usage guide                                                |
+| Command                   | Description                                                                                    |
+| ------------------------- | ---------------------------------------------------------------------------------------------- |
+| `/oms:auto <goal>`        | Start autonomous orchestration — plan, execute, verify, done (verify fail → back to executing) |
+| `/oms:team <N> <goal>`    | Multi-agent orchestration — N teammates in isolated git worktrees, lead orchestrates           |
+| `/oms:plan <goal>`        | Iterative planning with consensus — analyze, create tasks, discuss with user                   |
+| `/oms:qa <context>`       | QA loop — diagnose issues, fix them, run build/test until clean                                |
+| `/oms:goal <description>` | Generate a structured goal artifact with scope and success criteria                            |
+| `/oms:verify <context>`   | Manual verification — review changes and run build/test                                        |
+| `/oms:release <context>`  | Release flow — version bump, changelog, git tag                                                |
+| `/oms:save <context>`     | Save session memory — snapshot state and extract reusable patterns                             |
+| `/oms:stop`               | Stop the active OMS session                                                                    |
+| `/oms:help`               | Show the full OMS usage guide                                                                  |
 
 ## MCP Tools
 
-| Tool                | Description                                                                  |
-| ------------------- | ---------------------------------------------------------------------------- |
-| `oms-start`         | Initialize an orchestration session with a goal                              |
-| `oms-get-state`     | Get current state (stage, tasks, turn count, logs)                           |
-| `oms-set-stage`     | Transition to a new stage (planning → executing → verifying → fixing → done) |
-| `oms-add-task`      | Add a task during the planning phase                                         |
-| `oms-complete-task` | Mark a task as completed                                                     |
-| `oms-snapshot`      | Save, restore, or list execution snapshots                                   |
-| `oms-learn`         | Extract reusable patterns and orchestrate skill evolution cycle              |
-| `oms-stop`          | End the orchestration session and clean up state                             |
+| Tool                | Description                                                                                          |
+| ------------------- | ---------------------------------------------------------------------------------------------------- |
+| `oms-start`         | Initialize an orchestration session with a goal                                                      |
+| `oms-get-state`     | Get current state (stage, tasks, turn count, logs)                                                   |
+| `oms-set-stage`     | Transition to a new stage (planning → executing → verifying → done; verify fail → back to executing) |
+| `oms-set-team`      | Record the active snow-cli team name (for /oms:team multi-agent mode)                                |
+| `oms-add-task`      | Add a task during the planning phase                                                                 |
+| `oms-complete-task` | Mark a task as completed                                                                             |
+| `oms-snapshot`      | Save, restore, or list execution snapshots                                                           |
+| `oms-learn`         | Extract reusable patterns and orchestrate skill evolution cycle                                      |
+| `oms-stop`          | End the orchestration session and clean up state                                                     |
 
 ## Skills
 
@@ -170,9 +173,6 @@ Spawn a sub-agent with `#oms_<agent_name>`:
 		"oms": {
 			"command": "node",
 			"args": ["/absolute/path/to/oh-my-snow/dist/mcp-server.js"],
-			"env": {
-				"OMS_STATE_DIR": "/absolute/path/to/project/.snow/oms-state"
-			},
 			"timeout": 300000,
 			"enabled": true
 		}
@@ -288,6 +288,7 @@ oh-my-snow/
 │   ├── commands/
 │   │   └── oms/
 │   │       ├── auto.json
+│   │       ├── team.json
 │   │       ├── plan.json
 │   │       ├── qa.json
 │   │       ├── goal.json

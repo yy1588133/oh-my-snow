@@ -24,7 +24,7 @@ import {join} from 'path';
 
 // ── Types ──
 
-export type Stage = 'planning' | 'executing' | 'verifying' | 'fixing' | 'done';
+export type Stage = 'planning' | 'executing' | 'verifying' | 'done';
 
 export interface Task {
 	id: string;
@@ -67,6 +67,13 @@ export interface OmsState {
 	createdAt: string;
 	/** When the session was last updated */
 	updatedAt: string;
+	/**
+	 * Team name reference (optional).
+	 * Only set when running in /oms:team multi-agent mode — references the
+	 * snow-cli TeamConfig name. OMS does NOT mirror snow-cli's team state;
+	 * this is a single reference field so oms-get-state can surface team context.
+	 */
+	teamName?: string;
 }
 
 // ── Constants ──
@@ -74,8 +81,8 @@ export interface OmsState {
 const VALID_TRANSITIONS: Record<Stage, Stage[]> = {
 	planning: ['executing'],
 	executing: ['verifying', 'planning'],
-	verifying: ['fixing', 'done'],
-	fixing: ['verifying'],
+	// 无 fixing 中间态：verifying 失败直接回 executing（lead 自修或重新 spawn）
+	verifying: ['done', 'executing'],
 	done: [],
 };
 
@@ -310,6 +317,19 @@ export function completeTask(state: OmsState, taskId: string): OmsState {
 		throw new Error(`Task not found: ${taskId}`);
 	}
 	task.completed = true;
+	state.updatedAt = new Date().toISOString();
+	saveState(state);
+	return state;
+}
+
+/**
+ * Set the team name reference on the state.
+ * Used by /oms:team to record which snow-cli team this session orchestrates.
+ * OMS only stores the name — the authoritative team state lives in snow-cli
+ * (~/.snow/teams/<team>/config.json).
+ */
+export function setTeamName(state: OmsState, teamName: string): OmsState {
+	state.teamName = teamName;
 	state.updatedAt = new Date().toISOString();
 	saveState(state);
 	return state;

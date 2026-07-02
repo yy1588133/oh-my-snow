@@ -69,6 +69,7 @@ const fsEditContext = JSON.stringify({ toolName: 'filesystem-edit', args: { file
 const fsCreateContext = JSON.stringify({ toolName: 'filesystem-create', args: { filePath: 'new.ts' } });
 const readContext = JSON.stringify({ toolName: 'filesystem-read', args: {} });
 const terminalContext = JSON.stringify({ toolName: 'terminal-execute', args: {} });
+const teamSpawnContext = JSON.stringify({ toolName: 'team-spawn_teammate', args: { name: 'worker1', role: 'coder', prompt: 'do work' } });
 
 // ── beforeToolCall tests ──
 
@@ -96,10 +97,24 @@ writeState({ ...baseState, stage: 'verifying' });
 const r5 = runHook('hooks/before-tool-call.mjs', fsEditContext);
 assert('beforeToolCall: verifying blocks filesystem-edit', r5.exitCode === 1, `got ${r5.exitCode}`);
 
-// Test 6: fixing stage allows filesystem-edit
-writeState({ ...baseState, stage: 'fixing' });
-const r6 = runHook('hooks/before-tool-call.mjs', fsEditContext);
-assert('beforeToolCall: fixing allows filesystem-edit', r6.exitCode === 0, `got ${r6.exitCode}`);
+// Test 6: team-spawn_teammate stage enforcement (delayed spawn — US-005/006)
+// planning blocks spawn (delayed spawn), verifying blocks spawn, done blocks spawn, executing allows spawn
+writeState({ ...baseState, stage: 'planning' });
+const r6a = runHook('hooks/before-tool-call.mjs', teamSpawnContext);
+assert('beforeToolCall: planning blocks team-spawn_teammate', r6a.exitCode === 1, `got ${r6a.exitCode}`);
+assert('beforeToolCall: planning spawn block message', r6a.stderr.includes('Delayed spawn'), r6a.stderr.slice(0, 200));
+
+writeState({ ...baseState, stage: 'executing' });
+const r6b = runHook('hooks/before-tool-call.mjs', teamSpawnContext);
+assert('beforeToolCall: executing allows team-spawn_teammate', r6b.exitCode === 0, `got ${r6b.exitCode}`);
+
+writeState({ ...baseState, stage: 'verifying' });
+const r6c = runHook('hooks/before-tool-call.mjs', teamSpawnContext);
+assert('beforeToolCall: verifying blocks team-spawn_teammate', r6c.exitCode === 1, `got ${r6c.exitCode}`);
+
+writeState({ ...baseState, stage: 'done' });
+const r6d = runHook('hooks/before-tool-call.mjs', teamSpawnContext);
+assert('beforeToolCall: done blocks team-spawn_teammate', r6d.exitCode === 1, `got ${r6d.exitCode}`);
 
 // Test 7: done stage blocks filesystem-edit
 writeState({ ...baseState, stage: 'done' });
@@ -238,23 +253,24 @@ assert('onStop: idle migrated to planning prompt', r22.stderr.includes('[OMS:CON
 const migratedState = JSON.parse(readFileSync(join(stateDir, 'state.json'), 'utf-8'));
 assert('onStop: idle stage persisted as planning in state.json', migratedState.stage === 'planning', `got ${migratedState.stage}`);
 
-// Test 23: done + failing build → stage force-transitioned to 'fixing' in state.json
+// Test 23: done + failing build → stage force-transitioned to 'executing' in state.json
+// (fixing stage removed — verifying/done failure goes back to executing to allow edits)
 writeState({ ...baseState, stage: 'done', verifyCommand: 'node -e "process.exit(1)"', turnCount: 1 });
 writeFileSync(join(stateDir, '.pending-verify'), '', 'utf-8');
 const r23 = runHook('hooks/on-stop.mjs', JSON.stringify({ messages: [] }));
 assert('onStop: done + failing build = exit 2', r23.exitCode === 2, `got ${r23.exitCode}`);
 assert('onStop: done + failing build = STAGE TRANSITION message', r23.stderr.includes('[OMS:STAGE TRANSITION]'), r23.stderr.slice(0, 300));
 assert('onStop: done + failing build = BUILD FAILED message', r23.stderr.includes('[OMS:BUILD FAILED]'), r23.stderr.slice(0, 300));
-// Verify state was force-transitioned to 'fixing'
+// Verify state was force-transitioned to 'executing' (was 'fixing' before stage removal)
 const state23 = JSON.parse(readFileSync(join(stateDir, 'state.json'), 'utf-8'));
-assert('onStop: done + failing build = stage is fixing in state.json', state23.stage === 'fixing', `got ${state23.stage}`);
+assert('onStop: done + failing build = stage is executing in state.json', state23.stage === 'executing', `got ${state23.stage}`);
 assert('onStop: done + failing build = turnCount incremented', state23.turnCount === 2, `got ${state23.turnCount}`);
-assert('onStop: done + failing build = stageHistory has fixing entry', state23.stageHistory.some(h => h.stage === 'fixing'), JSON.stringify(state23.stageHistory));
+assert('onStop: done + failing build = stageHistory has executing entry', state23.stageHistory.some(h => h.stage === 'executing'), JSON.stringify(state23.stageHistory));
 
-// Test 23b: After force-transition to fixing, beforeToolCall allows filesystem-edit
-// (state23 from previous test already has stage='fixing' in state.json)
+// Test 23b: After force-transition to executing, beforeToolCall allows filesystem-edit
+// (state23 from previous test already has stage='executing' in state.json)
 const r23b = runHook('hooks/before-tool-call.mjs', fsEditContext);
-assert('beforeToolCall: fixing (after force-transition) allows filesystem-edit', r23b.exitCode === 0, `got ${r23b.exitCode}`);
+assert('beforeToolCall: executing (after force-transition) allows filesystem-edit', r23b.exitCode === 0, `got ${r23b.exitCode}`);
 
 // Test 24: done + PASSING build → exit 0, turn count NOT incremented (optimization preserved)
 writeState({ ...baseState, stage: 'done', verifyCommand: 'echo success', turnCount: 5 });
@@ -324,14 +340,67 @@ assert(
 );
 rmSync(tmpDir, { recursive: true, force: true });
 
-// Test 31: onStop with fixing stage + failing build → continuation prompt, NOT stage transition
-writeState({ ...baseState, stage: 'fixing', verifyCommand: 'node -e "process.exit(1)"', turnCount: 1 });
+// Test 31: onStop with executing stage + failing build → continuation prompt, NOT stage transition
+// (was 'fixing' before stage removal; fixing deleted so verifying failure goes back to executing.
+//  executing + failing build should NOT force-transition — only done→executing force-transitions.)
+writeState({ ...baseState, stage: 'executing', verifyCommand: 'node -e "process.exit(1)"', turnCount: 1 });
 writeFileSync(join(stateDir, '.pending-verify'), '', 'utf-8');
 const r31 = runHook('hooks/on-stop.mjs', JSON.stringify({ messages: [] }));
-assert('onStop: fixing + failing build = exit 2', r31.exitCode === 2, `got ${r31.exitCode}`);
-assert('onStop: fixing + failing build = no STAGE TRANSITION message', !r31.stderr.includes('[OMS:STAGE TRANSITION]'), r31.stderr.slice(0, 300));
-assert('onStop: fixing + failing build = BUILD FAILED message', r31.stderr.includes('[OMS:BUILD FAILED]'), r31.stderr.slice(0, 300));
-assert('onStop: fixing + failing build = CONTINUE prompt', r31.stderr.includes('[OMS:CONTINUE]'), r31.stderr.slice(0, 500));
+assert('onStop: executing + failing build = exit 2', r31.exitCode === 2, `got ${r31.exitCode}`);
+assert('onStop: executing + failing build = no STAGE TRANSITION message', !r31.stderr.includes('[OMS:STAGE TRANSITION]'), r31.stderr.slice(0, 300));
+assert('onStop: executing + failing build = BUILD FAILED message', r31.stderr.includes('[OMS:BUILD FAILED]'), r31.stderr.slice(0, 300));
+assert('onStop: executing + failing build = CONTINUE prompt', r31.stderr.includes('[OMS:CONTINUE]'), r31.stderr.slice(0, 500));
+
+// Test 32: verifying stage runs verification UNCONDITIONALLY (no marker needed) — US-008
+// (verifying never writes the .pending-verify marker because afterToolCall's VERIFY_STAGES excludes 'verifying',
+//  so the old marker-gated check would skip. Fix: runVerification called unconditionally for verifying.)
+// Uses an isolated state dir so the unconditional verify doesn't pollute the shared state.json for later tests.
+const isoDir32 = join(tmpdir(), `oms-test-32-${Date.now()}`);
+mkdirSync(isoDir32, { recursive: true });
+writeFileSync(join(isoDir32, 'state.json'), JSON.stringify({ ...baseState, stage: 'verifying', verifyCommand: 'node -e "process.exit(1)"', turnCount: 1 }, null, 2));
+// NOTE: no .pending-verify marker written — verifying must run build anyway
+const r32 = runHookFromDir('hooks/on-stop.mjs', JSON.stringify({ messages: [] }), process.cwd(), isoDir32);
+assert('onStop: verifying + no marker = still runs build (exit 2)', r32.exitCode === 2, `got ${r32.exitCode}`);
+assert('onStop: verifying + no marker = BUILD FAILED message', r32.stderr.includes('[OMS:BUILD FAILED]'), r32.stderr.slice(0, 300));
+assert('onStop: verifying + failing build = CONTINUE prompt', r32.stderr.includes('[OMS:CONTINUE]') && r32.stderr.includes('Verifying'), r32.stderr.slice(0, 500));
+rmSync(isoDir32, { recursive: true, force: true });
+
+// Test 33: verifying stage with no verify command → null fallback (US-008 hazard d)
+// Isolated dir + no package.json/verify.cmd → detectVerifyCommand returns null.
+// Must NOT silently pass — should surface "[OMS:VERIFY] No build/test command detected".
+const isoDir33 = join(tmpdir(), `oms-test-33-${Date.now()}`);
+mkdirSync(isoDir33, { recursive: true });
+writeFileSync(join(isoDir33, 'state.json'), JSON.stringify({ ...baseState, stage: 'verifying', verifyCommand: '', turnCount: 1, goal: 'no build system' }, null, 2));
+const r33 = runHookFromDir(join(process.cwd(), 'hooks/on-stop.mjs'), JSON.stringify({ messages: [] }), isoDir33, isoDir33);
+assert('onStop: verifying + null verify = exit 2 (not silent pass)', r33.exitCode === 2, `got ${r33.exitCode} stderr=${r33.stderr.slice(0, 200)}`);
+assert('onStop: verifying + null verify = VERIFY warning (no silent pass)', r33.stderr.includes('[OMS:VERIFY]') && r33.stderr.includes('No build/test command detected'), r33.stderr.slice(0, 400));
+rmSync(isoDir33, { recursive: true, force: true });
+
+// Test 34: teamName in state → team-mode continuation prompt (US-009)
+const isoDir34 = join(tmpdir(), `oms-test-34-${Date.now()}`);
+mkdirSync(isoDir34, { recursive: true });
+writeFileSync(join(isoDir34, 'state.json'), JSON.stringify({ ...baseState, stage: 'planning', teamName: 'refactor-utils', turnCount: 1, goal: 'split utils' }, null, 2));
+const r34 = runHookFromDir(join(process.cwd(), 'hooks/on-stop.mjs'), JSON.stringify({ messages: [] }), isoDir34, isoDir34);
+assert('onStop: teamName + planning = Team Lead prompt', r34.stderr.includes('Planning (Team Lead)'), r34.stderr.slice(0, 400));
+assert('onStop: teamName + planning = delayed spawn notice', r34.stderr.includes('Delayed spawn'), r34.stderr.slice(0, 500));
+// CRITICAL-1 fix: planning team-mode prompt MUST instruct oms-add-task as the task-creation tool
+// (snow-cli's team-create_task requires an active team that only exists after first spawn → deadlock if called in planning)
+assert('onStop: teamName + planning = instructs oms-add-task', r34.stderr.includes('oms-add-task'), r34.stderr.slice(0, 600));
+
+writeFileSync(join(isoDir34, 'state.json'), JSON.stringify({ ...baseState, stage: 'executing', teamName: 'refactor-utils', turnCount: 1, goal: 'split utils' }, null, 2));
+const r34b = runHookFromDir(join(process.cwd(), 'hooks/on-stop.mjs'), JSON.stringify({ messages: [] }), isoDir34, isoDir34);
+assert('onStop: teamName + executing = Team Lead prompt', r34b.stderr.includes('Executing (Team Lead)'), r34b.stderr.slice(0, 400));
+assert('onStop: teamName + executing = spawn instruction', r34b.stderr.includes('team-spawn_teammate'), r34b.stderr.slice(0, 500));
+rmSync(isoDir34, { recursive: true, force: true });
+
+// Test 35: non-team mode (no teamName) → original single-agent prompt preserved (backward compat)
+const isoDir35 = join(tmpdir(), `oms-test-35-${Date.now()}`);
+mkdirSync(isoDir35, { recursive: true });
+writeFileSync(join(isoDir35, 'state.json'), JSON.stringify({ ...baseState, stage: 'planning', turnCount: 1, goal: 'solo task' }, null, 2));
+const r35 = runHookFromDir(join(process.cwd(), 'hooks/on-stop.mjs'), JSON.stringify({ messages: [] }), isoDir35, isoDir35);
+assert('onStop: no teamName = single-agent prompt (backward compat)', r35.stderr.includes('Planning — Turn') && !r35.stderr.includes('Team Lead'), r35.stderr.slice(0, 400));
+assert('onStop: no teamName = oms-add-task instruction preserved', r35.stderr.includes('oms-add-task'), r35.stderr.slice(0, 500));
+rmSync(isoDir35, { recursive: true, force: true });
 
 // Cleanup
 rmSync(stateDir, { recursive: true, force: true });

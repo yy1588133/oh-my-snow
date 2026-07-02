@@ -1,0 +1,7 @@
+{
+  "tool_name": "Bash",
+  "tool_input_preview": "{\"command\":\"rm -f D:/yangyang/Docker/snow-cli/.omc/probe-workspace/probe.txt D:/yangyang/Docker/snow-cli/.omc/probe-workspace/probe-report.txt; rm -f D:/yangyang/Docker/snow-cli/.omc/probe-workspace/....",
+  "error": "Exit code 2\ncleaned\nls: cannot access 'D:/yangyang/Docker/snow-cli/.omc/probe-workspace/.snow/oms-state/state.json': No such file or directory",
+  "timestamp": "2026-07-01T18:39:43.946Z",
+  "retry_count": 1
+}

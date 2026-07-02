@@ -30,7 +30,9 @@ const FILE_WRITE_TOOLS = new Set([
 ]);
 
 // Stages that should trigger auto-verification after file edits
-const VERIFY_STAGES = new Set(['executing', 'fixing']);
+// Note: 'verifying' is NOT in this set — verifying stage runs verification
+// unconditionally in on-stop.mjs (runVerification), not via the marker.
+const VERIFY_STAGES = new Set(['executing']);
 
 // ── Main ──
 

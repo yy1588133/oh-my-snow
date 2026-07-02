@@ -1,0 +1,81 @@
+{
+  "updatedAt": "2026-07-01T18:25:58.584Z",
+  "missions": [
+    {
+      "id": "session:10cd2c72-c1f6-4c4d-ba4b-e019a792b322:none",
+      "source": "session",
+      "name": "none",
+      "objective": "Session mission",
+      "createdAt": "2026-07-01T18:03:19.244Z",
+      "updatedAt": "2026-07-01T18:25:58.584Z",
+      "status": "running",
+      "workerCount": 3,
+      "taskCounts": {
+        "total": 3,
+        "pending": 0,
+        "blocked": 0,
+        "inProgress": 1,
+        "completed": 2,
+        "failed": 0
+      },
+      "agents": [
+        {
+          "name": "architect:afd4913",
+          "role": "architect",
+          "ownership": "afd4913834f33cefc",
+          "status": "done",
+          "currentStep": null,
+          "latestUpdate": "completed",
+          "completedSummary": null,
+          "updatedAt": "2026-07-01T18:05:41.070Z"
+        },
+        {
+          "name": "code-simplifier:acbcc2f",
+          "role": "code-simplifier",
+          "ownership": "acbcc2febe1e83e2f",
+          "status": "done",
+          "currentStep": null,
+          "latestUpdate": "completed",
+          "completedSummary": null,
+          "updatedAt": "2026-07-01T18:09:30.004Z"
+        },
+        {
+          "name": "qa-tester:a56712f",
+          "role": "qa-tester",
+          "ownership": "a56712f3edc89f7e8",
+          "status": "running",
+          "currentStep": null,
+          "latestUpdate": null,
+          "completedSummary": null,
+          "updatedAt": "2026-07-01T18:25:58.584Z"
+        }
+      ],
+      "timeline": [
+        {
+          "id": "session-start:acbcc2febe1e83e2f:2026-07-01T18:06:50.508Z",
+          "at": "2026-07-01T18:06:50.508Z",
+          "kind": "update",
+          "agent": "code-simplifier:acbcc2f",
+          "detail": "started code-simplifier:acbcc2f",
+          "sourceKey": "session-start:acbcc2febe1e83e2f"
+        },
+        {
+          "id": "session-stop:acbcc2febe1e83e2f:2026-07-01T18:09:30.004Z",
+          "at": "2026-07-01T18:09:30.004Z",
+          "kind": "completion",
+          "agent": "code-simplifier:acbcc2f",
+          "detail": "completed",
+          "sourceKey": "session-stop:acbcc2febe1e83e2f"
+        },
+        {
+          "id": "session-start:a56712f3edc89f7e8:2026-07-01T18:25:58.584Z",
+          "at": "2026-07-01T18:25:58.584Z",
+          "kind": "update",
+          "agent": "qa-tester:a56712f",
+          "detail": "started qa-tester:a56712f",
+          "sourceKey": "session-start:a56712f3edc89f7e8"
+        }
+      ]
+    }
+  ]
+}

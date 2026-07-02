@@ -12,17 +12,16 @@
  *   3. Merges 18 oms_* agents into ~/.snow/sub-agents.json
  *   4. Copies skills from assets/skills/oms/ to ~/.snow/skills/oms/
  *   5. Copies commands from assets/commands/oms/ to ~/.snow/commands/oms/
- *   6. Copies hook scripts (*.mjs) to <project>/.snow/oms-state/ (deployed per-project)
- *   7. Copies hook config JSONs to <project>/.snow/hooks/ (merging with existing)
- *   8. Creates .snow/oms-state/ directory
+ *   6. Installs hook configs to ~/.snow/hooks/ (global, with absolute path commands)
+ *   7. Creates <project>/.snow/oms-state/ directory (for runtime state storage)
  *
  * What `oms uninstall` does:
  *   1. Removes oms from settings.json mcpServers
  *   2. Removes oms_* agents from sub-agents.json
  *   3. Removes ~/.snow/skills/oms/ directory
  *   4. Removes ~/.snow/commands/oms/ directory
- *   5. Removes OMS hook rules from .snow/hooks/*.json
- *   6. Removes .snow/oms-state/ directory
+ *   5. Removes OMS hook rules from ~/.snow/hooks/*.json (global)
+ *   6. Removes <project>/.snow/oms-state/ directory
  */
 
 import {execSync} from 'child_process';
@@ -37,6 +36,11 @@ import {
 } from 'fs';
 import {join, dirname, resolve} from 'path';
 import {homedir} from 'os';
+import {fileURLToPath} from 'url';
+
+// ESM equivalent of CommonJS __dirname (package.json has "type": "module").
+// Without this, `__dirname` is undefined at runtime → `oms setup` crashes.
+const __dirname = dirname(fileURLToPath(import.meta.url));
 
 // ── Constants ──
 
@@ -46,6 +50,7 @@ const SETTINGS_PATH = join(SNOW_DIR, 'settings.json');
 const SUB_AGENTS_PATH = join(SNOW_DIR, 'sub-agents.json');
 const SKILLS_TARGET = join(SNOW_DIR, 'skills', 'oms');
 const COMMANDS_TARGET = join(SNOW_DIR, 'commands', 'oms');
+const GLOBAL_HOOKS_DIR = join(SNOW_DIR, 'hooks');
 
 const OMS_HOOK_DESCRIPTION_PREFIX = 'OMS:';
 
@@ -86,7 +91,7 @@ function findPackageDir(): string {
 		// npm not available, fall through
 	}
 
-	// Try: __dirname (running from dist/ inside the package)
+	// Try: __dirname (ESM-defined above; running from dist/ inside the package)
 	const localPath = resolve(__dirname, '..');
 	if (existsSync(join(localPath, 'package.json'))) {
 		return localPath;
@@ -149,14 +154,13 @@ function setupMcpConfig(packageDir: string): void {
 		settings.mcpServers = {};
 	}
 
-	const stateDir = join(process.cwd(), '.snow', 'oms-state');
+	// OMS_STATE_DIR is intentionally omitted — both the MCP server (store.ts)
+	// and hook scripts (oms-state.mjs) fall back to process.cwd() at runtime,
+	// which dynamically resolves to the current project directory.
 	const mcpServers = settings.mcpServers as Record<string, unknown>;
 	mcpServers['oms'] = {
 		command: 'node',
 		args: [mcpServerPath],
-		env: {
-			OMS_STATE_DIR: stateDir,
-		},
 		timeout: 300000,
 		enabled: true,
 	};
@@ -281,51 +285,21 @@ function setupCommands(packageDir: string): void {
 // ── Setup: Hooks ──
 
 function setupHooks(packageDir: string): void {
-	const cwd = process.cwd();
 	const hooksSourceDir = join(packageDir, 'hooks');
 	const hookConfigsSourceDir = join(packageDir, 'assets', 'hooks');
 
-	const hooksTargetDir = join(cwd, '.snow', 'oms-state');
-	const hookConfigsTargetDir = join(cwd, '.snow', 'hooks');
-
-	// 1. Copy hook scripts (*.mjs) to <project>/.snow/oms-state/
-	if (existsSync(hooksSourceDir)) {
-		mkdirSync(hooksTargetDir, {recursive: true});
-
-		let hookScriptCount = 0;
-		const hookFiles = readdirSync(hooksSourceDir).filter(f =>
-			f.endsWith('.mjs'),
-		);
-
-		for (const file of hookFiles) {
-			const src = join(hooksSourceDir, file);
-			const dst = join(hooksTargetDir, file);
-			cpSync(src, dst, {force: true});
-			hookScriptCount++;
-		}
-
-		console.log(
-			c.green(
-				`  ✓ ${hookScriptCount} hook scripts copied to ${hooksTargetDir}`,
-			),
-		);
-
-		// Copy lib directory (shared utilities for hooks)
-		const libSourceDir = join(hooksSourceDir, 'lib');
-		if (existsSync(libSourceDir)) {
-			const libTargetDir = join(hooksTargetDir, 'lib');
-			cpSync(libSourceDir, libTargetDir, {recursive: true});
-			console.log(c.green(`  ✓ Shared lib copied to ${libTargetDir}`));
-		}
-	} else {
-		console.warn(
-			c.yellow('  ⚠️  Warning: hooks/ directory not found in package.'),
-		);
+	// Normalize a path to use forward slashes and wrap in double quotes
+	// for safe cross-platform usage in shell commands.
+	function toQuotedPath(p: string): string {
+		return '"' + p.replace(/\\/g, '/') + '"';
 	}
 
-	// 2. Copy hook config JSONs to <project>/.snow/hooks/ (merging with existing)
+	// Hook scripts stay in the npm package — no copying to each project needed.
+	// Commands in hook configs reference them via absolute paths.
+
+	// 1. Install hook config JSONs to ~/.snow/hooks/ (global, merging with existing)
 	if (existsSync(hookConfigsSourceDir)) {
-		mkdirSync(hookConfigsTargetDir, {recursive: true});
+		mkdirSync(GLOBAL_HOOKS_DIR, {recursive: true});
 
 		const configFiles = readdirSync(hookConfigsSourceDir).filter(f =>
 			f.endsWith('.json'),
@@ -333,12 +307,35 @@ function setupHooks(packageDir: string): void {
 
 		for (const configFile of configFiles) {
 			const configSrcPath = join(hookConfigsSourceDir, configFile);
-			const configDstPath = join(hookConfigsTargetDir, configFile);
+			const configDstPath = join(GLOBAL_HOOKS_DIR, configFile);
 
 			// Read the new OMS hook rules
 			const omsRules = readJson<unknown[]>(configSrcPath);
 			if (!Array.isArray(omsRules)) {
 				continue;
+			}
+
+			// Replace relative paths in command fields with absolute paths to the npm package
+			for (const rule of omsRules) {
+				if (typeof rule === 'object' && rule !== null) {
+					const hooks = (rule as Record<string, unknown>).hooks;
+					if (Array.isArray(hooks)) {
+						for (const hook of hooks) {
+							if (typeof hook === 'object' && hook !== null) {
+								const cmd = (hook as Record<string, unknown>).command;
+								if (typeof cmd === 'string') {
+									// Replace ".snow/oms-state/xxx.mjs" with absolute path to package hooks dir
+									const scriptMatch = cmd.match(/\.snow\/oms-state\/(.+\.mjs)/);
+									if (scriptMatch) {
+										const absolutePath = join(hooksSourceDir, scriptMatch[1]);
+										(hook as Record<string, unknown>).command =
+											'node ' + toQuotedPath(absolutePath);
+									}
+								}
+							}
+						}
+					}
+				}
 			}
 
 			// Read existing rules (if any) and filter out old OMS rules
@@ -372,7 +369,7 @@ function setupHooks(packageDir: string): void {
 
 		console.log(
 			c.green(
-				`  ✓ ${configFiles.length} hook configs merged into ${hookConfigsTargetDir}`,
+				`  ✓ ${configFiles.length} hook configs merged into ${GLOBAL_HOOKS_DIR} (global)`,
 			),
 		);
 	} else {
@@ -381,8 +378,8 @@ function setupHooks(packageDir: string): void {
 		);
 	}
 
-	// 3. Create .snow/oms-state/ directory
-	const stateDir = join(cwd, '.snow', 'oms-state');
+	// 2. Create project-level .snow/oms-state/ directory (for runtime state storage)
+	const stateDir = join(process.cwd(), '.snow', 'oms-state');
 	mkdirSync(stateDir, {recursive: true});
 	console.log(c.green(`  ✓ State directory created at ${stateDir}`));
 }
@@ -461,23 +458,17 @@ function uninstallCommands(): void {
 	}
 }
 
-// ── Uninstall: Hooks ──
-
 function uninstallHooks(): void {
-	const cwd = process.cwd();
-	const hookConfigsDir = join(cwd, '.snow', 'hooks');
-	const stateDir = join(cwd, '.snow', 'oms-state');
-
-	// 1. Remove OMS hook rules from .snow/hooks/*.json
-	if (existsSync(hookConfigsDir)) {
+	// 1. Remove OMS hook rules from ~/.snow/hooks/*.json (global)
+	if (existsSync(GLOBAL_HOOKS_DIR)) {
 		let removedConfigs = 0;
 		try {
-			const configFiles = readdirSync(hookConfigsDir).filter(f =>
+			const configFiles = readdirSync(GLOBAL_HOOKS_DIR).filter(f =>
 				f.endsWith('.json'),
 			);
 
 			for (const configFile of configFiles) {
-				const configPath = join(hookConfigsDir, configFile);
+				const configPath = join(GLOBAL_HOOKS_DIR, configFile);
 				const existingRules = readJson<unknown[]>(configPath);
 
 				if (!Array.isArray(existingRules) || existingRules.length === 0) {
@@ -503,12 +494,12 @@ function uninstallHooks(): void {
 			if (removedConfigs > 0) {
 				console.log(
 					c.green(
-						`  ✓ Removed OMS hook rules from ${removedConfigs} config file(s) in ${hookConfigsDir}`,
+						`  ✓ Removed OMS hook rules from ${removedConfigs} config file(s) in ${GLOBAL_HOOKS_DIR}`,
 					),
 				);
 			} else {
 				console.log(
-					c.dim('  • No OMS hook rules found in .snow/hooks/, skipping.'),
+					c.dim('  • No OMS hook rules found in ~/.snow/hooks/, skipping.'),
 				);
 			}
 		} catch {
@@ -517,12 +508,13 @@ function uninstallHooks(): void {
 	} else {
 		console.log(
 			c.dim(
-				'  • .snow/hooks/ directory not found, skipping hook config removal.',
+				'  • ~/.snow/hooks/ directory not found, skipping hook config removal.',
 			),
 		);
 	}
 
-	// 2. Remove .snow/oms-state/ directory (contains hook scripts + state.json)
+	// 2. Remove project-level .snow/oms-state/ directory (contains state.json)
+	const stateDir = join(process.cwd(), '.snow', 'oms-state');
 	if (existsSync(stateDir)) {
 		rmSync(stateDir, {recursive: true, force: true});
 		console.log(c.green(`  ✓ Removed ${stateDir}`));
@@ -571,13 +563,15 @@ function setup(): void {
 	// 4. Commands
 	setupCommands(packageDir);
 
-	// 5-6. Hooks (scripts + configs)
+	// 5-6. Hooks (global configs + project state dir)
 	setupHooks(packageDir);
 
 	console.log(c.green('\n  ═══════════════════════════════════════════════'));
 	console.log(c.green('  ✅ OMS setup complete!\n'));
 	console.log(c.cyan('  Next steps:'));
-	console.log('    1. Restart Snow CLI to load the new MCP server and hooks');
+	console.log(
+		'    1. Restart Snow CLI to load the new MCP server and global hooks',
+	);
 	console.log('    2. Run /oms:help to see all available commands');
 	console.log('    3. Start with: /oms:auto "your goal here"\n');
 }
@@ -639,17 +633,16 @@ ${c.bold('Setup details:')}
   • Merges 18 sub-agents into ~/.snow/sub-agents.json
   • Copies 10 skills to ~/.snow/skills/oms/
   • Copies 9 commands to ~/.snow/commands/oms/
-  • Copies 4 hook scripts + shared lib to <project>/.snow/oms-state/
-  • Merges 4 hook configs into <project>/.snow/hooks/
-  • Creates <project>/.snow/oms-state/ for session state
+  • Installs 4 hook configs to ~/.snow/hooks/ (global, with absolute path commands)
+  • Creates <project>/.snow/oms-state/ for session state (auto-created per project at runtime)
 
 ${c.bold('Uninstall details:')}
   • Removes MCP server from settings.json
   • Removes all oms_* agents from sub-agents.json
   • Removes ~/.snow/skills/oms/ directory
   • Removes ~/.snow/commands/oms/ directory
-  • Removes OMS hook rules from .snow/hooks/*.json
-  • Removes .snow/oms-state/ directory
+  • Removes OMS hook rules from ~/.snow/hooks/*.json (global)
+  • Removes <project>/.snow/oms-state/ directory
 
 ${c.bold('After setup, use in Snow CLI:')}
   /oms:auto "your goal"     — Start autonomous orchestration

@@ -24,6 +24,7 @@ import {
 	setStage,
 	addTask,
 	completeTask,
+	setTeamName,
 	addLog,
 	saveSnapshot,
 	loadSnapshot,
@@ -122,7 +123,7 @@ server.registerTool(
 							`5. Use oms-complete-task to mark tasks as done\n` +
 							`6. Call oms-set-stage { stage: "verifying" } when all tasks are done\n` +
 							`7. The system will auto-run build/test after file edits\n` +
-							`8. If issues found, call oms-set-stage { stage: "fixing" }\n` +
+							`8. If issues found, call oms-set-stage { stage: "executing" } to fix them\n` +
 							`9. When everything passes, call oms-set-stage { stage: "done" }`,
 					},
 				],
@@ -187,6 +188,9 @@ server.registerTool(
 							`Goal:    ${state.goal}\n` +
 							`Turn:    ${state.turnCount}\n` +
 							`Verify:  ${state.verifyCommand || '(auto-detect)'}\n` +
+							(state.teamName
+								? `Team:    ${state.teamName} (multi-agent mode)\n`
+								: '') +
 							`Created: ${state.createdAt}\n` +
 							`Updated: ${state.updatedAt}\n\n` +
 							`Tasks (${state.tasks.filter(t => t.completed).length}/${
@@ -217,10 +221,10 @@ server.registerTool(
 	'oms-set-stage',
 	{
 		description:
-			'Transition to a new orchestration stage. Valid transitions: planning→executing, executing→verifying|planning, verifying→fixing|done, fixing→verifying.',
+			'Transition to a new orchestration stage. Valid transitions: planning→executing, executing→verifying|planning, verifying→done|executing (no fixing stage — verifying failure goes back to executing).',
 		inputSchema: {
 			stage: z
-				.enum(['planning', 'executing', 'verifying', 'fixing', 'done'])
+				.enum(['planning', 'executing', 'verifying', 'done'])
 				.describe('The stage to transition to'),
 		},
 	},
@@ -348,6 +352,54 @@ server.registerTool(
 						text: `✅ Task completed: ${params.taskId}\n  Completed: ${
 							updated.tasks.filter(t => t.completed).length
 						}/${updated.tasks.length}\n  Remaining: ${remaining} task(s)`,
+					},
+				],
+			};
+		} catch (error) {
+			return {
+				content: [
+					{type: 'text' as const, text: `Error: ${(error as Error).message}`},
+				],
+				isError: true,
+			};
+		}
+	},
+);
+
+// ── Tool: oms-set-team ──
+
+server.registerTool(
+	'oms-set-team',
+	{
+		description:
+			'Set the team name reference on the OMS state. Used by /oms:team to record which snow-cli team this session orchestrates. OMS only stores the name — the authoritative team state lives in snow-cli (~/.snow/teams/<team>/).',
+		inputSchema: {
+			teamName: z
+				.string()
+				.describe('The snow-cli team name to associate with this OMS session'),
+		},
+	},
+	params => {
+		try {
+			const state = loadState();
+			if (!state) {
+				return {
+					content: [
+						{
+							type: 'text' as const,
+							text: 'No active OMS session. Call oms-start first.',
+						},
+					],
+					isError: true,
+				};
+			}
+
+			const updated = setTeamName(state, params.teamName);
+			return {
+				content: [
+					{
+						type: 'text' as const,
+						text: `✅ Team name set: ${updated.teamName}\n\nOMS is now in multi-agent team mode.\nThe snow-cli team "${params.teamName}" owns the authoritative team state.\nUse team-* tools (spawn_teammate, create_task, etc.) to orchestrate teammates.`,
 					},
 				],
 			};

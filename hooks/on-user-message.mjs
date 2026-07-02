@@ -23,7 +23,6 @@ function getStagePrompt(state) {
 	const goal = state.goal;
 	const tasks = state.tasks;
 	const completedTasks = tasks.filter((t) => t.completed);
-	const remainingTasks = tasks.filter((t) => !t.completed);
 
 	switch (stage) {
 		case 'planning':
@@ -61,19 +60,8 @@ Instructions:
 - Review all changes made during execution
 - Run tests and verify correctness
 - DO NOT edit files — verification only
-- If issues are found, call oms-set-stage { stage: "fixing" }
+- If issues are found, call oms-set-stage { stage: "executing" } to fix them
 - If everything passes, call oms-set-stage { stage: "done" }`;
-
-		case 'fixing':
-			return `[OMS:FIXING]
-Goal: ${goal}
-Remaining tasks: ${remainingTasks.length}
-
-Instructions:
-- Fix the issues identified during verification
-- Use filesystem-* tools to make corrections
-- The system will auto-run build/test after edits
-- When fixes are complete, call oms-set-stage { stage: "verifying" }`;
 
 		case 'done':
 			return `[OMS:DONE]

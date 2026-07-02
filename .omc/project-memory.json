@@ -1,0 +1,228 @@
+{
+  "version": "1.0.0",
+  "lastScanned": 1782917587747,
+  "projectRoot": "D:\\yangyang\\Docker\\snow-cli\\oh-my-snow",
+  "techStack": {
+    "languages": [
+      {
+        "name": "JavaScript/TypeScript",
+        "version": ">=18",
+        "confidence": "high",
+        "markers": [
+          "package.json"
+        ]
+      },
+      {
+        "name": "TypeScript",
+        "version": null,
+        "confidence": "high",
+        "markers": [
+          "tsconfig.json"
+        ]
+      }
+    ],
+    "frameworks": [],
+    "packageManager": "npm",
+    "runtime": "Node.js 18"
+  },
+  "build": {
+    "buildCommand": "npm run build 2>&1 | tail -5 && echo \"---BUILD OK---\" && node -e \"JSON.parse(require('fs').readFileSync('assets/commands/oms/team.json','utf-8')); JSON.parse(require('fs').readFileSync('assets/hooks/afterToolCall.json','utf-8')); console.log('JSON validity: all OK')\"",
+    "testCommand": "cd \"D:/yangyang/Docker/snow-cli/oh-my-snow\"\nnpm test 2>&1 | grep -E \"^(Results|.*FAIL)\"",
+    "lintCommand": null,
+    "devCommand": "npm run dev",
+    "scripts": {
+      "build": "tsc",
+      "dev": "tsc --watch",
+      "start": "node dist/mcp-server.js",
+      "test": "node test/test-hooks.mjs && node test/test-v2-hooks.mjs && node test/test-mcp.mjs && node test/test-skill-evolution.mjs && node test/test-review-fixes.mjs",
+      "prepublishOnly": "npm run build && npm test"
+    }
+  },
+  "conventions": {
+    "namingStyle": "camelCase",
+    "importStyle": null,
+    "testPattern": null,
+    "fileOrganization": null
+  },
+  "structure": {
+    "isMonorepo": false,
+    "workspaces": [],
+    "mainDirectories": [
+      "assets",
+      "src",
+      "test"
+    ],
+    "gitBranches": null
+  },
+  "customNotes": [],
+  "directoryMap": {
+    "assets": {
+      "path": "assets",
+      "purpose": "Static assets",
+      "fileCount": 0,
+      "lastAccessed": 1782917587639,
+      "keyFiles": []
+    },
+    "dist": {
+      "path": "dist",
+      "purpose": "Distribution/build output",
+      "fileCount": 4,
+      "lastAccessed": 1782917587686,
+      "keyFiles": [
+        "installer.d.ts",
+        "installer.js",
+        "mcp-server.d.ts",
+        "mcp-server.js"
+      ]
+    },
+    "hooks": {
+      "path": "hooks",
+      "purpose": null,
+      "fileCount": 4,
+      "lastAccessed": 1782917587688,
+      "keyFiles": [
+        "after-tool-call.mjs",
+        "before-tool-call.mjs",
+        "on-stop.mjs",
+        "on-user-message.mjs"
+      ]
+    },
+    "src": {
+      "path": "src",
+      "purpose": "Source code",
+      "fileCount": 2,
+      "lastAccessed": 1782917587689,
+      "keyFiles": [
+        "installer.ts",
+        "mcp-server.ts"
+      ]
+    },
+    "test": {
+      "path": "test",
+      "purpose": "Test files",
+      "fileCount": 5,
+      "lastAccessed": 1782917587690,
+      "keyFiles": [
+        "test-hooks.mjs",
+        "test-mcp.mjs",
+        "test-review-fixes.mjs",
+        "test-skill-evolution.mjs",
+        "test-v2-hooks.mjs"
+      ]
+    },
+    "hooks\\lib": {
+      "path": "hooks\\lib",
+      "purpose": "Library code",
+      "fileCount": 1,
+      "lastAccessed": 1782917587694,
+      "keyFiles": [
+        "oms-state.mjs"
+      ]
+    }
+  },
+  "hotPaths": [
+    {
+      "path": "test\\test-v2-hooks.mjs",
+      "accessCount": 18,
+      "lastAccessed": 1782929065848,
+      "type": "directory"
+    },
+    {
+      "path": "hooks\\on-stop.mjs",
+      "accessCount": 11,
+      "lastAccessed": 1782929694618,
+      "type": "file"
+    },
+    {
+      "path": "",
+      "accessCount": 7,
+      "lastAccessed": 1782929286438,
+      "type": "directory"
+    },
+    {
+      "path": "hooks\\before-tool-call.mjs",
+      "accessCount": 5,
+      "lastAccessed": 1782929230162,
+      "type": "file"
+    },
+    {
+      "path": "test\\test-mcp.mjs",
+      "accessCount": 3,
+      "lastAccessed": 1782927720267,
+      "type": "file"
+    },
+    {
+      "path": "test",
+      "accessCount": 3,
+      "lastAccessed": 1782929054697,
+      "type": "directory"
+    },
+    {
+      "path": "hooks\\on-user-message.mjs",
+      "accessCount": 3,
+      "lastAccessed": 1782929700466,
+      "type": "directory"
+    },
+    {
+      "path": "assets\\commands\\oms\\qa.json",
+      "accessCount": 2,
+      "lastAccessed": 1782929062675,
+      "type": "directory"
+    },
+    {
+      "path": "assets\\commands\\oms\\verify.json",
+      "accessCount": 2,
+      "lastAccessed": 1782929063013,
+      "type": "directory"
+    },
+    {
+      "path": "hooks\\lib\\oms-state.mjs",
+      "accessCount": 2,
+      "lastAccessed": 1782929236059,
+      "type": "file"
+    },
+    {
+      "path": "assets\\commands\\oms",
+      "accessCount": 1,
+      "lastAccessed": 1782928844280,
+      "type": "directory"
+    },
+    {
+      "path": "assets\\commands\\oms\\team.json",
+      "accessCount": 1,
+      "lastAccessed": 1782929016108,
+      "type": "file"
+    },
+    {
+      "path": "src\\state\\store.ts",
+      "accessCount": 1,
+      "lastAccessed": 1782929018202,
+      "type": "file"
+    },
+    {
+      "path": "src\\mcp-server.ts",
+      "accessCount": 1,
+      "lastAccessed": 1782929018350,
+      "type": "file"
+    },
+    {
+      "path": "assets\\hooks\\afterToolCall.json",
+      "accessCount": 1,
+      "lastAccessed": 1782929053264,
+      "type": "file"
+    },
+    {
+      "path": "README.md",
+      "accessCount": 1,
+      "lastAccessed": 1782929054116,
+      "type": "directory"
+    },
+    {
+      "path": "src\\installer.ts",
+      "accessCount": 1,
+      "lastAccessed": 1782930291966,
+      "type": "file"
+    }
+  ],
+  "userDirectives": []
+}

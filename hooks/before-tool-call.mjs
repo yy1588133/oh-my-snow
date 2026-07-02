@@ -34,6 +34,13 @@ const TERMINAL_TOOLS = new Set([
 	'terminal-execute',
 ]);
 
+// Team spawn tool — blocked in non-executing stages (delayed-spawn enforcement).
+// snow-cli exposes team tools with a `team-` prefix (mcpToolsManager.ts:411),
+// so the AI calls `team-spawn_teammate` and the hook receives that full name.
+const TEAM_SPAWN_TOOLS = new Set([
+	'team-spawn_teammate',
+]);
+
 /**
  * Check if the current stage allows the given tool.
  * Returns { allowed: boolean, reason: string }
@@ -60,8 +67,8 @@ function checkStageEnforcement(stage, toolName) {
 						`[OMS:BLOCKED] You are in the VERIFYING stage — file editing is not allowed.\n` +
 						`The verifying stage is for reviewing changes, not making new ones.\n\n` +
 						`If you found issues that need fixing:\n` +
-						`  Call oms-set-stage { stage: "fixing" }\n\n` +
-						`Then you can edit files to fix the issues.\n` +
+						`  Call oms-set-stage { stage: "executing" }\n\n` +
+						`Then you can edit files to fix the issues (lead self-fix or re-spawn teammate).\n` +
 						`If everything passes:\n` +
 						`  Call oms-set-stage { stage: "done" }`,
 				};
@@ -72,7 +79,7 @@ function checkStageEnforcement(stage, toolName) {
 						`[OMS:BLOCKED] The orchestration session is DONE — no further file edits allowed.\n\n` +
 						`If you need to make more changes, start a new session with oms-start.`,
 				};
-			// executing and fixing stages allow file edits
+			// executing stage allows file edits
 			// Note: 'idle' is handled by loadState()'s migration to 'planning',
 			// so it never reaches this function as 'idle'.
 			default:
@@ -91,6 +98,46 @@ function checkStageEnforcement(stage, toolName) {
 			};
 		}
 		return { allowed: true, reason: '' };
+	}
+
+	// Team spawn tool — delayed-spawn enforcement.
+	// Only allowed in executing stage; blocked in planning (lead must plan first),
+	// verifying (merge phase, no new teammates), and done (session over).
+	if (TEAM_SPAWN_TOOLS.has(toolName)) {
+		switch (stage) {
+			case 'planning':
+				return {
+					allowed: false,
+					reason:
+						`[OMS:BLOCKED] You are in the PLANNING stage — spawning teammates is not allowed yet.\n` +
+						`Delayed spawn is in effect: plan first, spawn later.\n\n` +
+						`1. Use oms-add-task to record the task list (OMS local tasks — for your own tracking; teammates cannot see these yet)\n` +
+						`   Do NOT call team-create_task in planning — it requires an active team that only exists after the first spawn\n` +
+						`2. Call oms-set-stage { stage: "executing" }\n` +
+						`3. Then spawn the FIRST teammate (creates the team), call team-create_task to publish tasks, and spawn the remaining teammates\n\n` +
+						`Only then can you spawn teammates with team-spawn_teammate.`,
+				};
+			case 'verifying':
+				return {
+					allowed: false,
+					reason:
+						`[OMS:BLOCKED] You are in the VERIFYING stage — no new teammates allowed.\n` +
+						`The verifying stage is for merging and reviewing teammate work.\n\n` +
+						`If you need more work done:\n` +
+						`  Call oms-set-stage { stage: "executing" } to go back and re-spawn teammates.\n\n` +
+						`Otherwise, proceed with team-merge_all_teammate_work.`,
+				};
+			case 'done':
+				return {
+					allowed: false,
+					reason:
+						`[OMS:BLOCKED] The orchestration session is DONE — no further teammates allowed.\n\n` +
+						`If you need more work, start a new session with oms-start.`,
+				};
+			// executing stage allows spawning teammates
+			default:
+				return { allowed: true, reason: '' };
+		}
 	}
 
 	// All other tools are always allowed

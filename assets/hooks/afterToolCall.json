@@ -1,7 +1,7 @@
 [
 	{
 		"matcher": "filesystem-create,filesystem-edit,filesystem-replaceedit",
-		"description": "OMS: Auto-run build/test after file edits in executing/fixing stages",
+		"description": "OMS: Auto-run build/test after file edits in executing stage",
 		"hooks": [
 			{
 				"type": "command",
