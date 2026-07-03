@@ -699,16 +699,25 @@ function savePrd(prd: Prd): void {
  * winner already refined in the gap or resurrect a state the user cleared via
  * oms-stop. Persistence is deferred to the caller's next mutation (refinePrd).
  *
- * @returns an object with the PRD (always present, possibly in-memory only) and
- *          `wrote` — whether this call actually persisted the scaffold to disk.
- *          Callers that surface a "created" message to the agent should check
- *          `wrote` so they don't claim success for a race-lost in-memory scaffold.
+ * @returns `{prd, wrote, persisted}`:
+ *   - `prd`        — always present (on-disk winner's, or in-memory scaffold)
+ *   - `wrote`      — whether THIS call persisted the scaffold to disk
+ *   - `persisted`  — whether `prd` reflects a PRD that is currently on disk
+ *                    (true when we wrote it, OR when we lost the race but the
+ *                    winner's PRD is on disk; false only for the in-memory-only
+ *                    scaffold with no disk PRD). Callers use this to decide
+ *                    whether to surface a "refine to persist" warning without
+ *                    an extra loadPrd round-trip.
  */
-export function initPrd(task: string): {prd: Prd; wrote: boolean} {
+export function initPrd(task: string): {
+	prd: Prd;
+	wrote: boolean;
+	persisted: boolean;
+} {
 	const existing = loadPrd();
 	if (existing) {
-		// PRD already on disk — not written by this call.
-		return {prd: existing, wrote: false};
+		// PRD already on disk — not written by this call, but it IS persisted.
+		return {prd: existing, wrote: false, persisted: true};
 	}
 	const now = new Date().toISOString();
 	const prd: Prd = {
@@ -747,7 +756,7 @@ export function initPrd(task: string): {prd: Prd; wrote: boolean} {
 		// instead of clobbering it with our scaffold.
 		const theirs = loadPrd();
 		if (theirs) {
-			return {prd: theirs, wrote: false};
+			return {prd: theirs, wrote: false, persisted: true};
 		}
 		// Lost the race AND no PRD on disk (winner wrote then deleted, or transient
 		// lock failure). Do NOT force-write our scaffold here — that could clobber
@@ -755,9 +764,9 @@ export function initPrd(task: string): {prd: Prd; wrote: boolean} {
 		// user explicitly cleared via oms-stop. Return the in-memory scaffold so
 		// the caller still has an object; if persistence is required, the caller's
 		// next mutation (refinePrd) will write under the lock and reconcile.
-		return {prd, wrote: false};
+		return {prd, wrote: false, persisted: false};
 	}
-	return {prd, wrote: true};
+	return {prd, wrote: true, persisted: true};
 }
 
 export interface RefinedStoryInput {
@@ -917,6 +926,26 @@ export function getPrdStory(storyId: string): PrdStory | null {
 }
 
 /**
+ * Result of setPrdStoryPasses — a structured outcome so the MCP layer can give
+ * the agent an accurate, actionable error WITHOUT re-loading the PRD (which the
+ * old `PrdStory | null` return forced — it could not distinguish "prd missing"
+ * vs "story missing" vs "guard refused", so the caller had to loadPrd again).
+ *
+ *   - ok:true            → the story, mutated and persisted
+ *   - ok:false + reason  → why it refused, plus counts for the guard case so the
+ *                          MCP layer can report "Verified: N/M" directly
+ */
+export type SetPrdStoryPassesResult =
+	| {ok: true; story: PrdStory}
+	| {
+			ok: false;
+			reason: 'missing-prd' | 'missing-story' | 'guard';
+			/** verified/total criteria at refusal — only meaningful for reason:'guard' */
+			verifiedCount?: number;
+			totalCount?: number;
+	  };
+
+/**
  * Mark a story's passes flag, or unmark it (reviewer rejection / rework).
  *
  * NOTE: this ONLY flips `passes` plus the `rejected` veto flag. The
@@ -926,9 +955,14 @@ export function getPrdStory(storyId: string): PrdStory | null {
  * invariant). The only place `passes` is auto-derived is setCriterionVerified
  * (passes = allCriteriaVerified on a non-rejected story).
  *
- * The guard is intentionally asymmetric — only passes:true is gated on every()
- * being verified:
- *   - mark-passes(true)  on an unverified story → REFUSED (null). Forces evidence.
+ * The guard is intentionally asymmetric — only passes:true is gated:
+ *   - mark-passes(true)  on an unverified story → REFUSED (ok:false, reason:'guard').
+ *     Forces evidence. The guard ALSO rejects a story with zero acceptance
+ *     criteria: `[].every()===true` would otherwise let an unverified story
+ *     pass vacuously. validateStoryInput forbids empty criteria on
+ *     refine/add-story, but it never runs on loadPrd, so a LEGACY PRD on disk
+ *     (predating the validation) could still have an empty-criteria story —
+ *     this guard closes that hole at runtime rather than requiring a migration.
  *   - mark-passes(true)  on a fully-verified story → OK (idempotent; also clears
  *     any prior `rejected` veto so the story is back to a clean pass state).
  *   - mark-passes(false) on any story → always OK (unmark needs no precondition;
@@ -938,33 +972,32 @@ export function getPrdStory(storyId: string): PrdStory | null {
  *     veto: a reviewer's "打回" invalidates prior evidence, the agent cannot
  *     rubber-stamp the story back via a bare mark-passes(true).
  *
- * Why mark-passes(false) clears verified flags (design choice, was previously
- * "leave as-is"): keeping verified=true across a reject let an agent bypass the
- * veto — mark-passes(true)'s `every(verified)` guard would pass immediately
- * without any re-verification, making the reject a no-op. Clearing evidence on
- * reject forces a genuine rework cycle: reject → (criteria now unverified) →
- * re-verify each with fresh evidence → mark-passes(true) succeeds. The
- * `rejected` flag additionally blocks setCriterionVerified's auto-lift, so the
- * agent MUST end with an explicit mark-passes(true) rather than relying on the
- * "last criterion verified → passes auto-flips" convenience.
+ * Returns a structured result so the caller can distinguish the three refusal
+ * reasons (missing-prd / missing-story / guard) and, for the guard case, report
+ * the exact verified/total counts without an extra loadPrd round-trip.
  */
 export function setPrdStoryPasses(
 	storyId: string,
 	passes: boolean,
-): PrdStory | null {
+): SetPrdStoryPassesResult {
 	const prd = loadPrd();
 	if (!prd) {
-		return null;
+		return {ok: false, reason: 'missing-prd'};
 	}
 	const story = prd.stories.find(s => s.id === storyId);
 	if (!story) {
-		return null;
+		return {ok: false, reason: 'missing-story'};
 	}
-	// Guard: refuse to mark passes:true unless every criterion is already verified.
-	// This enforces the "verify EACH criterion before mark-passes" invariant at the
-	// data layer — an agent can't skip per-criterion evidence and rubber-stamp a story.
-	if (passes && !story.acceptanceCriteria.every(c => c.verified)) {
-		return null;
+	const totalCount = story.acceptanceCriteria.length;
+	const verifiedCount = story.acceptanceCriteria.filter(c => c.verified).length;
+	// Guard: refuse to mark passes:true unless the story has at least one
+	// criterion AND every criterion is already verified. The length check closes
+	// the vacuous-truth hole — `[].every(()=>...)===true` on an empty array would
+	// otherwise let a legacy empty-criteria story (loaded from disk pre-validation)
+	// pass with zero evidence, defeating the core Ralph invariant. This is a
+	// runtime backstop; validateStoryInput prevents NEW empty-criteria stories.
+	if (passes && (totalCount === 0 || verifiedCount !== totalCount)) {
+		return {ok: false, reason: 'guard', verifiedCount, totalCount};
 	}
 	story.passes = passes;
 	if (passes) {
@@ -983,7 +1016,7 @@ export function setPrdStoryPasses(
 	}
 	story.updatedAt = new Date().toISOString();
 	savePrd(prd);
-	return story;
+	return {ok: true, story};
 }
 
 /**
@@ -1029,14 +1062,29 @@ export function setCriterionVerified(
 	}
 	criterion.verified = verified;
 	story.updatedAt = new Date().toISOString();
-	// Only lift passes when all criteria are verified AND the story hasn't been
+	// Only lift passes when ALL criteria are verified AND the story hasn't been
 	// explicitly rejected (rejected flag set by setPrdStoryPasses(id, false)).
 	// After a reviewer rejects a story, re-verifying a criterion must NOT
 	// auto-lift passes — the agent has to explicitly call mark-passes(true) to
 	// re-pass, so a reviewer's rejection is a real veto rather than something a
 	// noop re-verify overrides. A fresh `passes: false` story has rejected=false,
 	// so it still auto-lifts on full verification (convenience for fresh refine).
-	if (verified && !story.rejected && story.acceptanceCriteria.every(c => c.verified)) {
+	//
+	// The `length > 0` term is defense-in-depth for the empty-criteria vacuous-
+	// truth hole (an empty array makes every() return true vacuously). In
+	// practice it is unreachable for empty-criteria stories here: the
+	// `!criterion` check above already returns null when criterionIndex is out
+	// of range on an empty array. The REAL protection against legacy
+	// empty-criteria PRDs lives in setPrdStoryPasses's `totalCount === 0` guard
+	// (mark-passes(true) is the only path that can set passes=true on a loaded
+	// story). This term stays as a belt-and-suspenders safeguard against a
+	// future change that relaxes the out-of-range check.
+	if (
+		verified &&
+		!story.rejected &&
+		story.acceptanceCriteria.length > 0 &&
+		story.acceptanceCriteria.every(c => c.verified)
+	) {
 		story.passes = true;
 	}
 	savePrd(prd);
@@ -1083,10 +1131,13 @@ export function getPrdStatus(): {
  * written with a visible '(no PRD yet)' marker so the empty header is diagnosable
  * — the next refinePrd deletes this file and rebuilds it with the real task.
  *
- * NOTE: uses `??` (not `||`) so a PRD whose task is intentionally an empty
- * string stays accurate ('# Task: ' empty) rather than being misreported as
- * '(no PRD yet)'. The '(no PRD yet)' marker only fires when loadPrd() itself
- * returns null — the PRD is genuinely absent.
+ * Uses `??` (not `||`) so a PRD whose task is intentionally an empty string is
+ * NOT misreported as '(no PRD yet)' — that marker only fires when loadPrd()
+ * itself returns null (the PRD is genuinely absent). But an empty-string task
+ * would render as a bare '# Task: ' line, which is hard to diagnose — so when a
+ * PRD exists but its task is empty/null, we show '(no task set)' instead. This
+ * can happen for a legacy PRD or one written via the store API bypassing the
+ * MCP refine guard (which refuses empty tasks).
  */
 export function initProgress(): boolean {
 	const filePath = getProgressFilePath();
@@ -1095,7 +1146,11 @@ export function initProgress(): boolean {
 	}
 	ensureStateDir();
 	const prd = loadPrd();
-	const task = prd ? (prd.task ?? '') : '(no PRD yet)';
+	const task = !prd
+		? '(no PRD yet)'
+		: prd.task && prd.task.trim().length > 0
+			? prd.task
+			: '(no task set)';
 	const header = `# Ralph Progress Log\n# Task: ${task}\n# Created: ${new Date().toISOString()}\n\n`;
 	writeFileSync(filePath, header, 'utf-8');
 	return true;
@@ -1120,7 +1175,11 @@ export function logProgress(message: string): void {
 	try {
 		if (!existsSync(filePath)) {
 			const prd = loadPrd();
-			const task = prd ? (prd.task ?? '') : '(no PRD yet)';
+			const task = !prd
+				? '(no PRD yet)'
+				: prd.task && prd.task.trim().length > 0
+					? prd.task
+					: '(no task set)';
 			const header = `# Ralph Progress Log\n# Task: ${task}\n# Created: ${timestamp}\n\n`;
 			writeFileSync(filePath, header, 'utf-8');
 		}

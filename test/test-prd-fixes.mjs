@@ -19,7 +19,14 @@ let pass = 0, fail = 0;
 const ok = (n, c) => { console.log((c ? '✅' : '❌') + ' ' + n); c ? pass++ : fail++; };
 
 // init + refine with a 2-criterion story
-store.initPrd('Test task');
+// FIX (test #4): initPrd returns {prd, wrote, persisted} — assert the contract
+// so a future refactor that breaks the shape is caught at the store boundary.
+const initRes = store.initPrd('Test task');
+ok('initPrd returns {prd, wrote} shape with wrote=true on fresh init',
+	initRes && typeof initRes === 'object' && initRes.prd &&
+	typeof initRes.prd.task === 'string' &&
+	initRes.wrote === true && initRes.persisted === true);
+ok('initPrd.prd has the scaffold story', initRes.prd.stories.length === 1);
 store.refinePrd('Test task', [
 	{title: 'Story A', acceptanceCriteria: ['crit 1', 'crit 2'], priority: 1},
 ]);
@@ -27,8 +34,12 @@ const story = store.getPrdStory('US-001');
 ok('refine created 2 criteria', story.acceptanceCriteria.length === 2);
 
 // FIX 1: mark-passes(true) must REFUSE when criteria not all verified
+// New signature: {ok:false, reason:'guard'} instead of null.
 const refused = store.setPrdStoryPasses('US-001', true);
-ok('mark-passes refuses unverified story (returns null)', refused === null);
+ok('mark-passes refuses unverified story (ok=false, reason=guard)',
+	refused && refused.ok === false && refused.reason === 'guard');
+ok('refused result carries verified/total counts for the message',
+	refused.verifiedCount === 0 && refused.totalCount === 2);
 const afterRefuse = store.getPrdStory('US-001');
 ok('story passes still false after refused mark', afterRefuse.passes === false);
 ok('criteria still unverified after refused mark', afterRefuse.acceptanceCriteria.every(c => !c.verified));
@@ -42,9 +53,17 @@ store.setCriterionVerified('US-001', 1, true);
 let all = store.getPrdStory('US-001');
 ok('after verify crit 1: passes auto true (all verified)', all.passes === true);
 
-// Now mark-passes(true) should SUCCEED (all verified)
+// Now mark-passes(true) should SUCCEED (all verified) — {ok:true, story}
 const accepted = store.setPrdStoryPasses('US-001', true);
-ok('mark-passes accepts fully-verified story', accepted !== null && accepted.passes === true);
+ok('mark-passes accepts fully-verified story (ok=true)',
+	accepted && accepted.ok === true && accepted.story.passes === true);
+// Lock the OTHER side of the union contract: the ok:true variant MUST carry a
+// `story` field (the ok:false variant must NOT — see the legacy empty-criteria
+// test below). Together these two assertions pin the discriminated union so a
+// future refactor that drops `story` from ok:true (or adds it to ok:false) is
+// caught at the store boundary.
+ok('ok:true variant carries a story object (union discriminated correctly)',
+	accepted.story !== undefined && typeof accepted.story === 'object' && accepted.story.id === 'US-001');
 
 // FIX 3: unmark-passes(false) drops passes AND clears verified (v2 veto semantics).
 // Previously unmark left verified flags intact; now it clears them + sets rejected,
@@ -119,12 +138,12 @@ ok('asym: explicit unmark CLEARS verified flags (veto)', afterMark.acceptanceCri
 // Re-mark passes(true) is REFUSED — criteria were cleared by the unmark, so the
 // agent must re-verify each before mark-passes(true) can succeed.
 const refusedReMark = store.setPrdStoryPasses('US-001', true);
-ok('asym: re-mark after unmark REFUSED (evidence cleared)', refusedReMark === null);
+ok('asym: re-mark after unmark REFUSED (evidence cleared)', refusedReMark && refusedReMark.ok === false && refusedReMark.reason === 'guard');
 // Re-verify all criteria, then mark-passes(true) succeeds.
 store.setCriterionVerified('US-001', 0, true);
 store.setCriterionVerified('US-001', 1, true);
 const reMarked = store.setPrdStoryPasses('US-001', true);
-ok('asym: re-mark after re-verify succeeds', reMarked !== null && reMarked.passes === true);
+ok('asym: re-mark after re-verify succeeds', reMarked && reMarked.ok === true && reMarked.story.passes === true);
 
 // ── FIX 6 (v2): reject is a REAL VETO — clears evidence + blocks auto-lift ──
 // New semantics: setPrdStoryPasses(id,false) clears ALL criterion verified flags
@@ -147,7 +166,7 @@ ok('asym: re-verify one criterion marks it verified', afterReverifyOne.acceptanc
 
 // mark-passes(true) is REFUSED — not all criteria re-verified yet (criterion 1 still false)
 const refusedMark = store.setPrdStoryPasses('US-001', true);
-ok('asym: mark-passes(true) refused after partial re-verify (evidence cleared by reject)', refusedMark === null);
+ok('asym: mark-passes(true) refused after partial re-verify (evidence cleared by reject)', refusedMark && refusedMark.ok === false && refusedMark.reason === 'guard');
 
 // Re-verify the remaining criterion. At this point ALL criteria are verified,
 // but passes must STILL be false — the rejected veto blocks setCriterionVerified's
@@ -161,8 +180,8 @@ ok('asym: all re-verified but passes STILL false (rejected blocks auto-lift)', a
 ok('asym: all re-verified — every criterion verified flag true', afterFullReverify.acceptanceCriteria.every(c => c.verified));
 // Now the explicit mark-passes(true) succeeds and clears the veto.
 const reMarkedAfterReject = store.setPrdStoryPasses('US-001', true);
-ok('asym: mark-passes(true) re-passes after full re-verify', reMarkedAfterReject !== null && reMarkedAfterReject.passes === true);
-ok('asym: mark-passes(true) clears rejected veto', reMarkedAfterReject.rejected === false);
+ok('asym: mark-passes(true) re-passes after full re-verify', reMarkedAfterReject && reMarkedAfterReject.ok === true && reMarkedAfterReject.story.passes === true);
+ok('asym: mark-passes(true) clears rejected veto', reMarkedAfterReject.story.rejected === false);
 
 store.deletePrd();
 
@@ -217,6 +236,67 @@ ok('C11: failed addPrdStory does not add a story', afterBadAdd && afterBadAdd.st
 // A valid addPrdStory still works.
 const added = store.addPrdStory('good', ['c1', 'c2'], 2);
 ok('C11: valid addPrdStory succeeds', added !== null && added.id === 'US-002' && added.priority === 2);
+
+store.deletePrd();
+
+// ── FIX 10 (#1): legacy PRD with empty acceptanceCriteria cannot bypass the reject veto ──
+// validateStoryInput forbids empty criteria on refine/add-story, but it never
+// runs on loadPrd. A PRD written before the validation existed (or via the store
+// API bypassing the MCP guard) could have a story with acceptanceCriteria: [].
+// `[].every(()=>...)===true` would then let mark-passes(true) succeed vacuously,
+// clearing a reject veto with ZERO verified evidence — defeating Ralph's core
+// invariant. The store must defend at RUNTIME, not rely on migration.
+//
+// Simulate a legacy PRD by writing one directly to disk (bypassing refinePrd's
+// validation), then assert both refusal paths hold:
+//   - setPrdStoryPasses(id, true) is refused (guard catches empty criteria)
+//   - setCriterionVerified does NOT auto-lift (length===0 guard in auto-lift)
+const legacyPrd = {
+	task: 'Legacy empty-criteria PRD',
+	refined: true,
+	stories: [{
+		id: 'US-001',
+		title: 'legacy empty story',
+		acceptanceCriteria: [],
+		passes: false,
+		rejected: true,  // pretend a reviewer already rejected it
+		priority: 1,
+		createdAt: '2024-01-01T00:00:00.000Z',
+		updatedAt: '2024-01-01T00:00:00.000Z',
+	}],
+	createdAt: '2024-01-01T00:00:00.000Z',
+	updatedAt: '2024-01-01T00:00:00.000Z',
+};
+writeFileSync(join(stateDir, 'prd.json'), JSON.stringify(legacyPrd, null, 2), 'utf-8');
+
+// mark-passes(true) must be REFUSED despite empty every() being vacuously true.
+// The guard's `totalCount === 0` check closes the vacuous-truth hole — this is
+// the REAL protection for legacy empty-criteria stories (setCriterionVerified's
+// length>0 auto-lift guard is unreachable for empty criteria because the
+// out-of-range null check fires first; mark-passes is the only path to
+// passes=true on a loaded story, so its guard is the load-bearing one).
+const legacyMark = store.setPrdStoryPasses('US-001', true);
+ok('#1: legacy empty-criteria story mark-passes(true) REFUSED (guard catches empty criteria)',
+	legacyMark && legacyMark.ok === false && legacyMark.reason === 'guard');
+ok('#1: refused result reports 0/0 counts (no criteria to verify)',
+	legacyMark.verifiedCount === 0 && legacyMark.totalCount === 0);
+// Lock the union contract: the ok:false variant must NOT carry a `story` field.
+// A future refactor that adds `story?: PrdStory` to the false variant (and
+// leaks a stale story) would not be caught without this assertion.
+ok('#1: refused result has no story field (union discriminated correctly)',
+	legacyMark.story === undefined);
+
+// setCriterionVerified on a non-existent index returns null (no criterion to
+// flip). For an empty-criteria story, criterionIndex 0 is out of range, so the
+// `!criterion` check returns null BEFORE the auto-lift guard is evaluated.
+// Asserting this documents that setCriterionVerified cannot be used to bypass
+// the veto on an empty-criteria story — the only path to passes=true is
+// mark-passes(true), which the guard above already refuses.
+const legacyVerify = store.setCriterionVerified('US-001', 0, true);
+ok('#1: setCriterionVerified on empty-criteria story returns null (out of range)', legacyVerify === null);
+// After the (no-op) verify attempt, passes must still be false — no path set it.
+const legacyAfterVerify = store.getPrdStory('US-001');
+ok('#1: empty-criteria story passes STILL false after verify attempt', legacyAfterVerify.passes === false);
 
 store.deletePrd();
 console.log(`\n${'='.repeat(50)}\nPRD fixes: ${pass} passed, ${fail} failed\n${'='.repeat(50)}`);

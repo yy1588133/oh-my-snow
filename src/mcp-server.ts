@@ -893,12 +893,14 @@ server.registerTool(
 		},
 	},
 	params => {
-		// Shared error-response builders for the pre-check boilerplate that
-		// mark-passes and verify-criterion both need. Centralizes the message
-		// format so the two cases stay consistent (DRY). The store-layer
-		// setPrdStoryPasses returns null without distinguishing "prd missing"
-		// vs "story missing" vs "guard refused", so the MCP layer must do its
-		// own loadPrd to give an accurate, actionable error to the agent.
+		// Shared error-response builders for mark-passes and verify-criterion.
+		// Centralizes the message format so the two cases stay consistent (DRY).
+		// setPrdStoryPasses returns a structured SetPrdStoryPassesResult that
+		// distinguishes missing-prd / missing-story / guard, so the mark-passes
+		// handler can give an accurate, actionable error in ONE store call — no
+		// MCP-layer loadPrd pre-check needed. verify-criterion still does its own
+		// loadPrd for the index-range check (it needs the story's criteria array
+		// to validate criterionIndex before calling the store).
 		const noPrdError = () => ({
 			content: [
 				{
@@ -917,6 +919,18 @@ server.registerTool(
 			],
 			isError: true as const,
 		});
+		// Shared CRITICAL refine warning for the init handler's two unrefined-PRD
+		// paths (existing-PRD early-return + concurrent-persisted branch). An
+		// unrefined PRD still has generic scaffold criteria — the agent must NOT
+		// enter the loop with those. Centralizing the warning text in ONE place
+		// keeps the two paths symmetric and prevents message drift. Returns '' for
+		// an already-refined PRD so callers can append it unconditionally.
+		const refineWarning = (prd: {refined: boolean}): string =>
+			prd.refined
+				? ''
+				: '\n\n⚠️ CRITICAL: This PRD still has generic acceptance criteria (not refined yet).\n' +
+				  'You MUST refine it with task-specific stories by calling oms-prd with action: "refine"\n' +
+				  'before entering the persistence loop.';
 		try {
 			switch (params.action) {
 				case 'init': {
@@ -933,22 +947,33 @@ server.registerTool(
 					}
 					const existing = loadPrd();
 					if (existing) {
+						// Surface the CRITICAL refine warning when the existing PRD is
+						// unrefined — same risk as the concurrent-persisted path below
+						// (generic scaffold criteria must not enter the loop). The shared
+						// `refineWarning` helper keeps the two paths' text in sync.
 						return {
 							content: [
 								{
 									type: 'text' as const,
-									text: `⚠️ A PRD already exists (task: "${existing.task}", refined: ${existing.refined}).\n\nIf you want to start fresh, call oms-stop first to clear state, or use "refine" to replace the stories.`,
+									text: `⚠️ A PRD already exists (task: "${existing.task}", refined: ${existing.refined}).\n\nIf you want to start fresh, call oms-stop first to clear state, or use "refine" to replace the stories.` +
+										refineWarning(existing),
 								},
 							],
 							isError: true,
 						};
 					}
-					const {prd, wrote} = initPrd(params.task);
+					const {prd, wrote, persisted} = initPrd(params.task);
 					// `wrote` distinguishes "we persisted the scaffold" from "we lost the
 					// lock race and are returning the winner's in-memory/disk PRD". The
 					// agent-facing message must reflect which happened — claiming "created"
 					// for a race-lost scaffold misleads the agent into refining a PRD that
 					// may already have been refined by the winner.
+					//
+					// `persisted` tells us whether `prd` reflects a PRD currently on disk
+					// (we wrote it, OR the winner's PRD is on disk). When !persisted, the
+					// scaffold is in-memory only and the agent must refine to persist it.
+					// This avoids a redundant `loadPrd()` re-read here — initPrd already
+					// loaded theirs internally and returned it, so we reuse `prd` directly.
 					if (wrote) {
 						return {
 							content: [
@@ -972,32 +997,37 @@ server.registerTool(
 							],
 						};
 					}
-					// `wrote === false` here means one of two race outcomes, both benign:
-					//   (a) Another session created the PRD between our pre-check and
-					//       initPrd's internal loadPrd — we return theirs (now on disk).
-					//   (b) We lost the lock race AND no PRD landed on disk (winner wrote
-					//       then deleted, or transient lock failure) — we return an
-					//       in-memory scaffold with no persistence.
-					// Distinguish by re-loading: if a PRD is now on disk, case (a) —
-					// surface it so the agent refines the real PRD; if not, case (b) —
-					// tell the agent persistence is deferred to the next refine.
-					const onDisk = loadPrd();
-					if (onDisk) {
+					if (persisted) {
+						// Case (a): another session created the PRD between our pre-check
+						// and initPrd's internal loadPrd — we return theirs (now on disk).
+						// Reuse `prd` directly instead of re-loading (initPrd already read
+						// theirs). If the winner's PRD is NOT yet refined, surface the
+						// CRITICAL refine warning — the agent must not enter the loop with
+						// the winner's generic scaffold criteria. Shared `refineWarning`
+						// helper keeps this text identical to the existing-PRD path above.
 						return {
 							content: [
 								{
 									type: 'text' as const,
 									text:
 										`⚠️ A PRD was created concurrently by another session — using theirs instead of writing a new scaffold.\n\n` +
-										`Task: ${onDisk.task}\n` +
-										`Refined: ${onDisk.refined}\n` +
-										`Stories: ${onDisk.stories.length}\n\n` +
+										`Task: ${prd.task}\n` +
+										`Refined: ${prd.refined}\n` +
+										`Stories: ${prd.stories.length}\n\n` +
 										`Call oms-prd with action: "refine" if you need task-specific stories,\n` +
-										`or action: "status" to inspect what the other session set up.`,
+										`or action: "status" to inspect what the other session set up.` +
+										refineWarning(prd),
 								},
 							],
 						};
 					}
+					// Case (b): lost the lock race AND no PRD on disk (winner wrote then
+					// deleted, or transient lock failure) — in-memory scaffold only.
+					// Tell the agent persistence is deferred to the next refine. Unlike
+					// the refine handler's guard (effectiveTask empty → error), refinePrd
+					// inherits `existing?.task || ''` — but there's no existing PRD here,
+					// so the agent MUST pass a task to refine, or call init again. We make
+					// this explicit so the agent doesn't hit refine's empty-task dead-end.
 					return {
 						content: [
 							{
@@ -1005,9 +1035,10 @@ server.registerTool(
 								text:
 									`⚠️ PRD scaffold was created in memory but NOT persisted to disk (lock contention with no winner write-through).\n\n` +
 									`Task (in-memory): ${prd.task}\n\n` +
-									`Recommended action: call oms-prd with action: "refine" — refinePrd writes\n` +
-									`under the lock and will reconcile/persist the PRD. Do NOT assume the\n` +
-									`scaffold is on disk until refine succeeds.`,
+									`Recommended action: call oms-prd with action: "refine" AND pass a "task" (e.g. the original goal).\n` +
+									`refinePrd writes under the lock and will reconcile/persist the PRD. Do NOT call refine\n` +
+									`without a task — with no PRD on disk, refine has no task to inherit and would refuse.\n` +
+									`Do NOT assume the scaffold is on disk until refine succeeds.`,
 							},
 						],
 						isError: true,
@@ -1204,44 +1235,24 @@ server.registerTool(
 						};
 					}
 					const passes = params.action === 'mark-passes';
-					// Distinguish the three reasons setPrdStoryPasses can return null
-					// (prd missing / story missing / guard refused) so the agent gets
-					// actionable guidance instead of a generic "no story found".
-					const existingPrd = loadPrd();
-					if (!existingPrd) {
-						return noPrdError();
-					}
-					const existingStory = existingPrd.stories.find(
-						s => s.id === params.storyId,
-					);
-					if (!existingStory) {
-						return noStoryError(params.storyId);
-					}
-					const story = setPrdStoryPasses(params.storyId, passes);
-					if (!story) {
-						// Story exists + PRD exists → only remaining cause is the guard
-						// (mark-passes:true refused because not all criteria are verified).
-						// Re-load the PRD here for an ACCURATE verified count — the
-						// existingStory snapshot above may be stale if another tool call
-						// verified/unverified a criterion in the gap. setPrdStoryPasses
-						// does its own internal loadPrd, so match that by reading fresh.
-						//
-						// C7 root cause: this 3rd loadPrd exists because the store-layer
-						// setPrdStoryPasses returns null without distinguishing "guard
-						// refused" from "story missing". To give the agent an accurate
-						// verified/total count we must re-read the PRD here. Eliminating
-						// this read requires changing the store signature to return a
-						// structured result (deferred — out of scope for this change set).
-						const freshPrd = loadPrd();
-						const freshStory = freshPrd?.stories.find(
-							s => s.id === params.storyId,
-						);
-						const verifiedCount = freshStory
-							? freshStory.acceptanceCriteria.filter(c => c.verified).length
-							: 0;
-						const totalCount = freshStory
-							? freshStory.acceptanceCriteria.length
-							: existingStory.acceptanceCriteria.length;
+					// setPrdStoryPasses returns a structured result distinguishing the
+					// three refusal reasons (missing-prd / missing-story / guard) plus
+					// the verified/total counts for the guard case. This lets us give the
+					// agent an accurate, actionable error in ONE store call — no MCP-layer
+					// loadPrd pre-check (read #1) and no post-refusal freshPrd re-read
+					// (read #3). The old code did up to 3 sync loadPrd+JSON.parse per refusal.
+					const result = setPrdStoryPasses(params.storyId, passes);
+					if (!result.ok) {
+						if (result.reason === 'missing-prd') {
+							return noPrdError();
+						}
+						if (result.reason === 'missing-story') {
+							return noStoryError(params.storyId);
+						}
+						// reason === 'guard': mark-passes(true) refused because not all
+						// criteria are verified (or the story has zero criteria — a legacy
+						// PRD). Direct the agent to verify each criterion first; the counts
+						// come straight from the store, no re-read needed.
 						return {
 							content: [
 								{
@@ -1249,7 +1260,7 @@ server.registerTool(
 									text:
 										`Error: Cannot mark story "${params.storyId}" as passing — not all acceptance criteria are verified yet.\n` +
 										`Call oms-prd with action: "verify-criterion" for each criterion with fresh evidence first.\n` +
-										`Verified: ${verifiedCount}/${totalCount}`,
+										`Verified: ${result.verifiedCount}/${result.totalCount}`,
 								},
 							],
 							isError: true,
@@ -1259,7 +1270,7 @@ server.registerTool(
 						content: [
 							{
 								type: 'text' as const,
-								text: `✅ Story ${story.id} passes set to ${story.passes}.`,
+								text: `✅ Story ${result.story.id} passes set to ${result.story.passes}.`,
 							},
 						],
 					};
@@ -1332,9 +1343,23 @@ server.registerTool(
 					// confused. After a reviewer reject (rejected=true), passes can't
 					// auto-lift even when all criteria are verified — the agent must
 					// explicitly call mark-passes(true). Surface that requirement here.
+					//
+					// passes-true branch MUST consult allVerified: setCriterionVerified's
+					// auto-lift is asymmetric — un-verifying a criterion on a passed story
+					// does NOT drop passes (only setPrdStoryPasses(false) does). So a story
+					// can have passes=true while allVerified=false. Reporting "all criteria
+					// verified" in that state would lie to the agent.
 					let statusLine: string;
-					if (story.passes) {
+					if (story.passes && allVerified) {
 						statusLine = `Story passes: true (all criteria verified)`;
+					} else if (story.passes) {
+						// passes=true but a criterion was un-verified after passing — the
+						// story is in a stale-pass state. Drop passes via mark-passes(false)
+						// to rework, or re-verify the outstanding criterion.
+						const verifiedCount = story.acceptanceCriteria.filter(c => c.verified).length;
+						statusLine =
+							`Story passes: true BUT ${story.acceptanceCriteria.length - verifiedCount} criterion/criteria un-verified after passing.\n` +
+							`passes was not auto-dropped (only mark-passes:false drops it). Re-verify the outstanding criterion, or call oms-prd with action: "unmark-passes" to rework.`;
 					} else if (story.rejected) {
 						// Split on allVerified so the message names the ACTUAL blocker:
 						//   - all verified → only the veto blocks auto-lift (needs mark-passes(true))
