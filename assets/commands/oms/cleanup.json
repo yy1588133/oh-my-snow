@@ -1,6 +1,6 @@
 {
   "name": "oms:cleanup",
-  "command": "Load the \"cleanup\" skill by calling the `skill-execute` tool with `{ \"skill\": \"oms/cleanup\" }`, then follow the skill's SKILL.md instructions to detect and clean up AI-generated redundant or low-quality code in the target below.\n\n## Target\n\n{{args}}",
+  "command": "Load the \"cleanup\" skill by calling the `skill-execute` tool with `{ \"skill\": \"oms/cleanup\" }`, then follow the skill's SKILL.md instructions to detect and clean up AI-generated redundant or low-quality code in the target below.\n\n## Target\n\n$ARGUMENTS",
   "type": "prompt",
   "description": "检测并清理 AI 生成的冗余或低质量代码。用法: /oms:cleanup <目标文件/目录/范围>",
   "argsHint": "<目标文件/目录/范围>"

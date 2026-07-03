@@ -1,6 +1,6 @@
 {
   "name": "oms:trace",
-  "command": "Load the \"trace\" skill by calling the `skill-execute` tool with `{ \"skill\": \"oms/trace\" }`, then follow the skill's SKILL.md instructions to trace execution paths through code, recording call chains and state changes for the target below.\n\n## Target\n\n{{args}}",
+  "command": "Load the \"trace\" skill by calling the `skill-execute` tool with `{ \"skill\": \"oms/trace\" }`, then follow the skill's SKILL.md instructions to trace execution paths through code, recording call chains and state changes for the target below.\n\n## Target\n\n$ARGUMENTS",
   "type": "prompt",
   "description": "执行路径追踪，记录调用链与状态变更。用法: /oms:trace <目标函数/入口/流程>",
   "argsHint": "<目标函数/入口/流程>"

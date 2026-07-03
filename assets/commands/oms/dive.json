@@ -1,6 +1,6 @@
 {
   "name": "oms:dive",
-  "command": "Load the \"dive\" skill by calling the `skill-execute` tool with `{ \"skill\": \"oms/dive\" }`, then follow the skill's SKILL.md instructions to perform a deep code analysis covering structure, dependencies, data flow, and risk assessment for the target below.\n\n## Target\n\n{{args}}",
+  "command": "Load the \"dive\" skill by calling the `skill-execute` tool with `{ \"skill\": \"oms/dive\" }`, then follow the skill's SKILL.md instructions to perform a deep code analysis covering structure, dependencies, data flow, and risk assessment for the target below.\n\n## Target\n\n$ARGUMENTS",
   "type": "prompt",
   "description": "深度代码分析，覆盖结构、依赖、数据流与风险评估。用法: /oms:dive <目标文件/模块/目录>",
   "argsHint": "<目标文件/模块/目录>"
