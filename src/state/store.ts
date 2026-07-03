@@ -1681,3 +1681,154 @@ export function deleteVerificationState(): void {
 	}
 	cleanupTmpFiles(filePath);
 }
+
+// ── Generic OMS state store (对标 omc state_write/state_read) ──
+//
+// 通用键值状态存储：每个 mode 一个 JSON 文件，覆盖写语义。
+// 用于 skill 跨会话/上下文压缩后恢复状态（interview rounds、trace 假设、
+// dive 流水线桥接数据等）。skill 侧负责读-改-写：先 read 拿当前对象，
+// 改字段，再 write 回去。
+//
+// 存储位置：.snow/oms-state/store/<mode>.json
+// mode 是状态域，每个 skill 用独立 mode 隔离（如 "interview", "deep-dive", "trace"）。
+// mode 只允许 ^[a-zA-Z0-9_-]+$，防路径遍历。
+
+const MODE_NAME_PATTERN = /^[a-zA-Z0-9_-]+$/;
+
+/** store 子目录：.snow/oms-state/store/ */
+function getOmsStoreDir(): string {
+	return join(getStateDir(), 'store');
+}
+
+/** mode 文件路径：.snow/oms-state/store/<mode>.json */
+function getOmsStoreFilePath(mode: string): string {
+	return join(getOmsStoreDir(), `${mode}.json`);
+}
+
+/** 校验 mode 名安全（只允许字母数字下划线连字符，防路径遍历；限长 128 防超长文件名）。 */
+function validateModeName(mode: string): void {
+	if (typeof mode !== 'string' || !MODE_NAME_PATTERN.test(mode)) {
+		throw new Error(
+			`Invalid mode name: "${mode}". Only alphanumeric characters, underscores, and hyphens are allowed (^[a-zA-Z0-9_-]+$).`,
+		);
+	}
+	if (mode.length > 128) {
+		throw new Error(
+			`Invalid mode name: length ${mode.length} exceeds 128 characters. Over-long mode names may fail on some filesystems.`,
+		);
+	}
+}
+
+/**
+ * 覆盖写整个 mode 对象到 .snow/oms-state/store/<mode>.json。
+ * 覆盖语义：直接替换文件内容，不做 merge。skill 侧先 read 拿当前对象，
+ * 改字段，再 write 回去。
+ *
+ * @param mode 状态域名（如 "interview", "deep-dive", "trace"）
+ * @param data 任意可 JSON 序列化的对象
+ */
+export function writeOmsState(mode: string, data: unknown): void {
+	validateModeName(mode);
+	// undefined 不可序列化（JSON.stringify(undefined) === undefined，非字符串），写入会损坏文件。
+	if (data === undefined) {
+		throw new Error(
+			`writeOmsState(mode="${mode}"): data must be a JSON-serializable object, got undefined. Pass null explicitly to clear a mode.`,
+		);
+	}
+	const dir = getOmsStoreDir();
+	if (!existsSync(dir)) {
+		mkdirSync(dir, {recursive: true});
+	}
+	const filePath = getOmsStoreFilePath(mode);
+	const content = JSON.stringify(data, null, 2);
+	// 复用现有原子写（lock + tmp + rename），保证并发安全和不产生半截文件。
+	// 用 'skip' 策略：锁争用时返回 false 让调用方知道写失败，不静默丢数据。
+	// oms-state 跟 prd.json 不同——skill state（interview rounds/trace hypotheses）
+	// 丢失不可恢复，必须让调用方重试而不是 last-writer-wins 静默覆盖。
+	const written = atomicWriteWithLock(filePath, content, 'skip');
+	if (!written) {
+		throw new Error(
+			`Failed to acquire lock for oms-state mode "${mode}" after retries (concurrent write in progress). Re-read the state, re-apply your changes, and retry the write.`,
+		);
+	}
+}
+
+/**
+ * 读整个 mode 对象。文件不存在返回 null。
+ *
+ * @param mode 状态域名
+ * @returns 反序列化的对象，或 null（文件不存在/JSON 损坏）
+ */
+export function readOmsState(mode: string): unknown | null {
+	validateModeName(mode);
+	const filePath = getOmsStoreFilePath(mode);
+	if (!existsSync(filePath)) {
+		return null;
+	}
+	try {
+		const content = readFileSync(filePath, 'utf-8');
+		return JSON.parse(content);
+	} catch (err) {
+		// JSON 损坏（可恢复：让调用方重写覆盖）当 null 返回。
+		// 真正的 IO/权限错误（EACCES/EPERM/磁盘故障）必须抛出，不能跟"不存在"混淆。
+		const code = (err as NodeJS.ErrnoException).code;
+		if (code === 'ENOENT') {
+			return null;
+		}
+		if (err instanceof SyntaxError) {
+			// JSON 解析失败——文件存在但内容损坏，返回 null 让调用方重写覆盖。
+			return null;
+		}
+		throw err;
+	}
+}
+
+/**
+ * 删除 mode 文件。文件不存在返回 false，删除成功返回 true。
+ *
+ * @param mode 状态域名
+ * @returns true 表示已删除，false 表示文件原本就不存在
+ */
+export function deleteOmsState(mode: string): boolean {
+	validateModeName(mode);
+	const filePath = getOmsStoreFilePath(mode);
+	if (!existsSync(filePath)) {
+		return false;
+	}
+	try {
+		unlinkSync(filePath);
+		// 清理可能残留的 lock/tmp 文件（跟 deleteState/deletePrd 一致）。
+		cleanupTmpFiles(filePath);
+		return true;
+	} catch (err) {
+		// ENOENT：文件刚被并发删了，当"原本不存在"返回 false。
+		// 其他错误（EACCES/EPERM）必须抛出，不能静默当"不存在"。
+		const code = (err as NodeJS.ErrnoException).code;
+		if (code === 'ENOENT') {
+			return false;
+		}
+		throw err;
+	}
+}
+
+/**
+ * 列出所有 mode 名（文件名去 .json 后缀）。
+ * store 目录不存在时返回空数组。
+ *
+ * @returns mode 名数组，如 ["interview", "deep-dive", "trace"]
+ */
+export function listOmsModes(): string[] {
+	const dir = getOmsStoreDir();
+	if (!existsSync(dir)) {
+		return [];
+	}
+	try {
+		return readdirSync(dir)
+			.filter(name => name.endsWith('.json'))
+			.map(name => name.slice(0, -5)) // 去掉 .json
+			.filter(name => MODE_NAME_PATTERN.test(name)) // 只返回合法 mode 名
+			.sort();
+	} catch {
+		return [];
+	}
+}

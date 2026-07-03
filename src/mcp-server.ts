@@ -50,6 +50,10 @@ import {
 	requestVerification,
 	submitApproval,
 	getPendingVerification,
+	writeOmsState,
+	readOmsState,
+	deleteOmsState,
+	listOmsModes,
 	type RefinedStoryInput,
 } from './state/store.js';
 import {writeFileSync, mkdirSync} from 'fs';
@@ -1740,6 +1744,171 @@ server.registerTool(
 						isError: true,
 					};
 			}
+		} catch (error) {
+			return {
+				content: [
+					{type: 'text' as const, text: `Error: ${(error as Error).message}`},
+				],
+				isError: true,
+			};
+		}
+	},
+);
+
+// ── Tool: oms-state ──
+//
+// 通用键值状态存储，对标 omc state_write/state_read。每个 mode 一个 JSON 文件，
+// 覆盖写语义。用于 skill 跨会话/上下文压缩后恢复状态（interview rounds、
+// trace hypotheses、deep-dive phase 等）。
+//
+// 存储位置：.snow/oms-state/store/<mode>.json
+// 覆盖写语义：skill 侧先 read 拿当前对象，改字段，再 write 回去。
+
+server.registerTool(
+	'oms-state',
+	{
+		description:
+			'Generic key-value state store (mirrors omc state_write/state_read). Each mode is one JSON file with overwrite semantics. Used by skills to persist state across sessions and context compaction (e.g. interview rounds, trace hypotheses, deep-dive phase). Read-modify-write: call "read" first, mutate the object, then "write" it back. Storage: .snow/oms-state/store/<mode>.json',
+		inputSchema: {
+			action: z
+				.enum(['write', 'read', 'delete', 'list'])
+				.describe('The state action to perform'),
+			mode: z
+				.string()
+				.optional()
+				.describe(
+					'State domain name (e.g. "interview", "deep-dive", "trace"). Required for write/read/delete; ignored by list. Must match ^[a-zA-Z0-9_-]+$.',
+				),
+			data: z
+				.string()
+				.optional()
+				.describe(
+					'JSON-serialized string of the state object (required for "write"). Overwrite semantics: the entire mode object is replaced.',
+				),
+		},
+	},
+	params => {
+		try {
+			if (params.action === 'list') {
+				const modes = listOmsModes();
+				return {
+					content: [
+						{
+							type: 'text' as const,
+							text:
+								modes.length > 0
+									? `Stored modes (${modes.length}):\n${modes
+											.map(m => `  - ${m}`)
+											.join('\n')}`
+									: 'No state modes stored yet.',
+						},
+					],
+				};
+			}
+
+			// write/read/delete all require a mode
+			if (!params.mode) {
+				return {
+					content: [
+						{
+							type: 'text' as const,
+							text: 'Error: "mode" is required for write/read/delete actions. Use action:"list" to see all modes.',
+						},
+					],
+					isError: true,
+				};
+			}
+
+			if (params.action === 'write') {
+				if (params.data === undefined) {
+					return {
+						content: [
+							{
+								type: 'text' as const,
+								text: 'Error: "data" (JSON string) is required for the "write" action.',
+							},
+						],
+						isError: true,
+					};
+				}
+				let parsed: unknown;
+				try {
+					parsed = JSON.parse(params.data);
+				} catch {
+					return {
+						content: [
+							{
+								type: 'text' as const,
+								text: 'Error: "data" must be valid JSON. Serialize the state object before passing it.',
+							},
+						],
+						isError: true,
+					};
+				}
+				writeOmsState(params.mode, parsed);
+				return {
+					content: [
+						{
+							type: 'text' as const,
+							text: `✅ State written: mode "${params.mode}" (${params.data.length} bytes).\n\nOverwrite semantics: the entire mode object was replaced. Read-modify-write pattern: call read first, mutate, then write back.`,
+						},
+					],
+				};
+			}
+
+			if (params.action === 'read') {
+				const data = readOmsState(params.mode);
+				if (data === null) {
+					// read 不存在是正常首写场景（read-modify-write 的首次 read），不当错误。
+					// 标 isError 会让 skill 误判为失败；改成中性提示，调用方据此知道该首次写入。
+					return {
+						content: [
+							{
+								type: 'text' as const,
+								text: `No state found for mode "${params.mode}" (first write or already cleared). Call action:"write" to initialize this mode.`,
+							},
+						],
+					};
+				}
+				return {
+					content: [
+						{
+							type: 'text' as const,
+							text: `✅ State read: mode "${params.mode}"\n\n${JSON.stringify(data, null, 2)}`,
+						},
+					],
+				};
+			}
+
+			if (params.action === 'delete') {
+				const deleted = deleteOmsState(params.mode);
+				if (!deleted) {
+					return {
+						content: [
+							{
+								type: 'text' as const,
+								text: `No state found for mode "${params.mode}" (nothing to delete).`,
+							},
+						],
+						isError: true,
+					};
+				}
+				return {
+					content: [
+						{
+							type: 'text' as const,
+							text: `✅ State deleted: mode "${params.mode}".`,
+						},
+					],
+				};
+			}
+
+			return {
+				content: [
+					{type: 'text' as const, text: `Unknown action: ${params.action}`},
+				],
+				isError: true,
+			};
 		} catch (error) {
 			return {
 				content: [

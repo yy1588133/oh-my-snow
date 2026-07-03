@@ -14,8 +14,8 @@ OMS wraps Snow CLI with a state machine, stage enforcement, auto-verification, a
 - 📸 **Snapshots** — Save and restore session state for long-running tasks
 - 🎓 **Learning** — Extract reusable patterns from sessions into SKILL.md files
 - 🤖 **18 specialized sub-agents** — Architecture, security, testing, research, and more, each with a structured `role` prompt ported from oh-my-claudecode (Role / Success Criteria / Constraints / Investigation Protocol / Final Checklist)
-- 📚 **9 skills** — Deep code analysis, execution tracing, cleanup, visual verification, learning, ralph, and more
-- 🛠️ **17 commands** — 10 workflow commands (auto, plan, qa, goal, verify, release, save, stop, team, help) + 7 skill-mapping commands (interview, dive, trace, cleanup, vverify, wiki, research)
+- 📚 **10 skills** — Knowledge base wiki, evidence-driven trace, ambiguity-gated interview, two-stage dive, visual-verdict QA, cleanup, research, learn, ralph, plan, and more
+- 🛠️ **18 commands** — 10 workflow commands (auto, plan, qa, goal, verify, release, save, stop, team, help) + 8 skill-mapping commands (interview, dive, trace, cleanup, vverify, wiki, research, learn)
 
 ## Installation
 
@@ -28,8 +28,8 @@ The `oms setup` command:
 
 1. Registers the MCP server in `~/.snow/settings.json`
 2. Merges 18 sub-agents into `~/.snow/sub-agents.json`
-3. Copies 9 skills to `~/.snow/skills/oms/`
-4. Copies 17 commands to `~/.snow/commands/oms/` (10 workflow + 7 skill mappings)
+3. Copies 10 skills to `~/.snow/skills/oms/`
+4. Copies 18 commands to `~/.snow/commands/oms/` (10 workflow + 8 skill mappings)
 5. Installs 4 hook configs to `~/.snow/hooks/` (global, with absolute path commands pointing to the npm package)
 6. Creates `<project>/.snow/oms-state/` for session state (auto-created per project at runtime)
 
@@ -59,7 +59,7 @@ OMS consists of **two systems** working together:
 
 ### System 1: MCP Server (State Management)
 
-A stdio MCP server with 8 tools that manage the orchestration state file (`.snow/oms-state/state.json`). The AI calls these tools to start sessions, add tasks, transition stages, save snapshots, and learn patterns.
+A stdio MCP server with 11 tools that manage the orchestration state file (`.snow/oms-state/state.json`) and skill state store (`.snow/oms-state/store/<mode>.json`). The AI calls these tools to start sessions, add tasks, transition stages, save snapshots, persist skill state, and learn patterns.
 
 ### System 2: Hooks (4 Lifecycle Hooks)
 
@@ -111,12 +111,12 @@ Each maps to a skill via the `skill-execute` tool — equivalent to `/skill oms/
 
 | Command                    | Skill            | Description                                                          |
 | -------------------------- | ---------------- | -------------------------------------------------------------------- |
-| `/oms:interview <desc>`    | `oms/interview`  | Socratic requirement clarification through iterative questioning     |
-| `/oms:dive <target>`       | `oms/dive`       | Deep code analysis: structure → dependencies → data flow → risks     |
-| `/oms:trace <target>`      | `oms/trace`      | Execution tracing: call chain tracing + state change recording        |
+| `/oms:interview <desc>`    | `oms/interview`  | Math-gated Socratic deep interview — 4-dim weighted ambiguity + threshold execution bridge        |
+| `/oms:dive <target>`       | `oms/dive`       | Two-stage pipeline: trace root-cause → 3-point inject into interview for requirements            |
+| `/oms:trace <target>`      | `oms/trace`      | Evidence-driven causal trace — multi-hypothesis + 6-tier evidence + rebuttal rounds              |
 | `/oms:cleanup <target>`    | `oms/cleanup`    | Detect and clean up AI-generated redundant or low-quality code       |
-| `/oms:vverify <target>`    | `oms/vverify`    | Visual verification: UI screenshot comparison + visual consistency   |
-| `/oms:wiki <target>`       | `oms/wiki`       | Auto-generate wiki documentation from source code analysis           |
+| `/oms:vverify <target>`    | `oms/vverify`    | Screenshot-driven visual QA judge — strict JSON verdict + 90-score threshold                     |
+| `/oms:wiki <target>`       | `oms/wiki`       | Persistent markdown knowledge base — ingest/query/lint, cross-session accumulation               |
 | `/oms:research <question>` | `oms/research`   | Autonomous multi-step research combining web search and code analysis |
 
 ## MCP Tools
@@ -131,6 +131,8 @@ Each maps to a skill via the `skill-execute` tool — equivalent to `/skill oms/
 | `oms-complete-task` | Mark a task as completed                                                                             |
 | `oms-snapshot`      | Save, restore, or list execution snapshots                                                           |
 | `oms-learn`         | Extract reusable patterns and orchestrate skill evolution cycle                                      |
+| `oms-prd`           | Ralph PRD management — init/refine/story/criteria/progress                                           |
+| `oms-state`         | Generic key-value state store for skills (mirrors omc state_write/state_read; `.snow/oms-state/store/<mode>.json`) |
 | `oms-stop`          | End the orchestration session and clean up state                                                     |
 
 ## Skills
@@ -139,12 +141,12 @@ Load a skill with `/skill oms/<name>`, or use the corresponding `/oms:<name>` co
 
 | Skill           | Description                                                                      |
 | --------------- | -------------------------------------------------------------------------------- |
-| `interview`     | Socratic-style requirement clarification through iterative questioning           |
-| `dive`          | Deep code analysis: structure → dependencies → data flow → risks                 |
-| `trace`         | Execution tracing: call chain tracing + state change recording                   |
+| `interview`     | Math-gated Socratic deep interview — 4-dimension weighted ambiguity score + threshold execution bridge |
+| `dive`          | Two-stage pipeline: trace root-cause → 3-point inject into interview for requirements            |
+| `trace`         | Evidence-driven causal trace — multi-hypothesis + 6-tier evidence + rebuttal rounds              |
 | `cleanup`       | Detect and clean up AI-generated redundant or low-quality code                   |
-| `vverify`       | Visual verification: UI screenshot comparison + visual consistency               |
-| `wiki`          | Auto-generate wiki documentation from source code analysis                       |
+| `vverify`       | Screenshot-driven visual QA judge — strict JSON verdict + 90-score threshold                     |
+| `wiki`          | Persistent markdown knowledge base — ingest/query/lint, cross-session accumulation               |
 | `research`      | Autonomous multi-step research combining web search and code analysis            |
 | `learn`         | Session-to-skill extractor + self-contained evolution pipeline (reflect → explore → evaluate) |
 
@@ -236,6 +238,10 @@ Tool names and collaboration references are adapted to snow-cli: `Glob/Grep/Read
 }
 ```
 
+### Skill State Store
+
+`<project>/.snow/oms-state/store/<mode>.json` — Per-mode skill state (one JSON file per mode, e.g. `interview.json`, `trace.json`, `deep-dive.json`). Managed via the `oms-state` MCP tool by skills themselves (read-modify-write with overwrite semantics), not the orchestration state machine.
+
 ### Hook Configuration
 
 `<project>/.snow/hooks/beforeToolCall.json`:
@@ -277,7 +283,7 @@ This command:
 ```
 oh-my-snow/
 ├── src/
-│   ├── mcp-server.ts          # MCP server with 8 tools
+│   ├── mcp-server.ts          # MCP server with 11 tools (incl. oms-state skill state store)
 │   ├── installer.ts           # CLI entry point (oms setup/uninstall/help)
 │   └── state/
 │       └── store.ts           # State management (JSON file persistence)
