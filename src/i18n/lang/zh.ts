@@ -49,8 +49,8 @@ export const zh: TranslationKeys = {
 		helpSetupDetailItems:
 			'• 在 ~/.snow/settings.json 注册 MCP 服务器\n' +
 			'• 将 18 个子代理合并到 ~/.snow/sub-agents.json\n' +
-			'• 复制 9 个技能到 ~/.snow/skills/oms/\n' +
-			'• 复制 18 个命令到 ~/.snow/commands/oms/(11 个工作流 + 7 个技能映射)\n' +
+			'• 复制 10 个技能到 ~/.snow/skills/oms/\n' +
+			'• 复制 18 个命令到 ~/.snow/commands/oms/(7 个工作流 + 11 个技能映射)\n' +
 			'• 安装 4 个钩子配置到 ~/.snow/hooks/(全局,使用绝对路径命令)\n' +
 			'• 创建 <项目>/.snow/oms-state/ 用于存储会话状态(运行时按项目自动创建)',
 		helpUninstallDetailItems:
@@ -62,7 +62,7 @@ export const zh: TranslationKeys = {
 			'• 移除 <项目>/.snow/oms-state/ 目录',
 		helpAfterSetupItems:
 			'/oms:auto "你的目标"     — 启动自主编排\n' +
-			'/oms:plan "你的目标"     — 迭代式规划达成共识\n' +
+			'/oms:plan "你的目标"     — 战略规划——共识循环产出决策文档，审批后才执行\n' +
 			'/oms:qa "上下文"         — 循环修复构建/测试错误\n' +
 			'/oms:help                 — 完整使用指南(含所有功能)',
 		errFindNodeModules: '无法找到全局 node_modules 路径。请确认 npm 已安装并在 PATH 中。',

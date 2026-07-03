@@ -49,8 +49,8 @@ export const en: TranslationKeys = {
 		helpSetupDetailItems:
 			'• Registers MCP server in ~/.snow/settings.json\n' +
 			'• Merges 18 sub-agents into ~/.snow/sub-agents.json\n' +
-			'• Copies 9 skills to ~/.snow/skills/oms/\n' +
-			'• Copies 18 commands to ~/.snow/commands/oms/ (11 workflow + 7 skill mappings)\n' +
+			'• Copies 10 skills to ~/.snow/skills/oms/\n' +
+			'• Copies 18 commands to ~/.snow/commands/oms/ (7 workflow + 11 skill mappings)\n' +
 			'• Installs 4 hook configs to ~/.snow/hooks/ (global, with absolute path commands)\n' +
 			'• Creates <project>/.snow/oms-state/ for session state (auto-created per project at runtime)',
 		helpUninstallDetailItems:
@@ -62,7 +62,7 @@ export const en: TranslationKeys = {
 			'• Removes <project>/.snow/oms-state/ directory',
 		helpAfterSetupItems:
 			'/oms:auto "your goal"     — Start autonomous orchestration\n' +
-			'/oms:plan "your goal"     — Iterative planning with consensus\n' +
+			'/oms:plan "your goal"     — Strategic planning — consensus loop produces decision artifact, execution only after approval\n' +
 			'/oms:qa "context"         — Fix build/test errors in a loop\n' +
 			'/oms:help                 — Full usage guide with all features',
 		errFindNodeModules: 'Failed to find global node_modules path. Is npm installed and on PATH?',
