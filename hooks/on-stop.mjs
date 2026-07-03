@@ -17,25 +17,15 @@
  * { messages: [...] }
  */
 
-import { existsSync, unlinkSync, readFileSync } from 'fs';
+import { existsSync, unlinkSync } from 'fs';
 import { join } from 'path';
 import { execSync } from 'child_process';
-import { getStateDir, loadState, saveState, detectVerifyCommand, readStdin, appendErrorLog, forceSetStage } from './lib/oms-state.mjs';
+import { getStateDir, loadState, saveState, detectVerifyCommand, readStdin, appendErrorLog, forceSetStage, loadPrd, inspectStateFile } from './lib/oms-state.mjs';
 
-// ── Ralph PRD helper (read-only — writes go through the MCP oms-prd tool) ──
-//
-// on-stop only needs to SURFACE PRD progress in the continuation prompt so the
-// AI knows which story to work on next. All mutations happen via the oms-prd
-// MCP tool (backed by store.ts). This reads prd.json directly to avoid a
-// runtime dependency on the compiled store.js (hooks are plain .mjs scripts).
-//
-// Atomicity note: store.ts writes prd.json via tmp+rename, which IS atomic on
-// the normal path — a reader sees either the old file or the new file, never a
-// partial one. The ONLY non-atomic path is the cross-device fallback in
-// tmpRenameWrite (renameSync throws EXDEV → direct writeFileSync), where a
-// reader can catch a half-written file. We retry once after a short sleep to
-// ride out that window. We do NOT retry on ENOENT (file deleted — not
-// transient) — only on SyntaxError (partial/corrupt JSON).
+// loadPrd extracted to lib/oms-state.mjs (Phase 2 US-003) so loadState can read
+// prd.updatedAt for the three-timestamp staleness check without duplicating the
+// read logic. on-stop.mjs still calls loadPrd() for buildPrdSection (surfacing
+// PRD progress in the continuation prompt) — same function, now shared.
 
 function syncSleep(ms) {
 	// Synchronous sleep via Atomics.wait when SharedArrayBuffer is available;
@@ -50,30 +40,6 @@ function syncSleep(ms) {
 		const start = Date.now();
 		while (Date.now() - start < ms) { /* spin fallback */ }
 	}
-}
-
-function loadPrd() {
-	const prdPath = join(getStateDir(), 'prd.json');
-	if (!existsSync(prdPath)) return null;
-	for (let attempt = 0; attempt < 2; attempt++) {
-		try {
-			return JSON.parse(readFileSync(prdPath, 'utf-8'));
-		} catch (error) {
-			// ENOENT between the existsSync above and readFileSync means the
-			// file was deleted mid-read (e.g. deletePrd during oms-stop) — not
-			// transient, don't retry, just return null.
-			if (error && error.code === 'ENOENT') {
-				return null;
-			}
-			// SyntaxError (partial JSON from cross-device fallback) or other
-			// transient read error — retry once after a short sleep before
-			// giving up and dropping Ralph context from the continuation prompt.
-			if (attempt === 0) {
-				syncSleep(20);
-			}
-		}
-	}
-	return null;
 }
 
 function buildPrdSection(prd) {
@@ -122,6 +88,12 @@ function getGitDiffStat() {
 function buildContinuationPrompt(state, gitDiff) {
 	const stage = state.stage;
 	const turn = state.turnCount;
+	// Iteration progress for the header (US-002): show turn/softMax (hard max hardMax)
+	// so the user can see how close the boulder is to the caps. Backfilled defaults
+	// match loadState (50/200) for legacy state without these fields.
+	const max = state.maxIterations ?? 50;
+	const hardMax = state.hardMaxIterations ?? 200;
+	const turnProgress = `${turn}/${max} (hard max ${hardMax})`;
 	const goal = state.goal;
 	const tasks = state.tasks;
 	const completedTasks = tasks.filter((t) => t.completed);
@@ -149,7 +121,7 @@ function buildContinuationPrompt(state, gitDiff) {
 				// after the first team-spawn_teammate runs (team.ts:560-566 throws otherwise).
 				// Since OMS blocks spawn in planning, calling team-create_task here would deadlock.
 				// Tasks migrate to team-create_task in the executing stage (after first spawn).
-				return `[OMS:CONTINUE] Planning (Team Lead) — Turn ${turn}
+				return `[OMS:CONTINUE] Planning (Team Lead) — Turn ${turnProgress}
 Goal: ${goal}
 ${diffSection}
 You are the TEAM LEAD in the planning stage. Delayed spawn is in effect.
@@ -165,7 +137,7 @@ In executing stage you will: spawn the FIRST teammate (creates the team) → use
 			const taskList = tasks.length > 0
 				? tasks.map((t) => `  [${t.completed ? '✓' : '○'}] ${t.id}: ${t.description}`).join('\n')
 				: '  (no tasks yet)';
-			return `[OMS:CONTINUE] Planning — Turn ${turn}
+			return `[OMS:CONTINUE] Planning — Turn ${turnProgress}
 Goal: ${goal}
 ${diffSection}
 Current plan:
@@ -178,7 +150,7 @@ When the plan is complete, call oms-set-stage { stage: "executing" } to start im
 		case 'executing': {
 			if (inTeamMode) {
 				// Team mode: lead spawns teammates + drives standby teammates via messages
-				return `[OMS:CONTINUE] Executing (Team Lead) — Turn ${turn}
+				return `[OMS:CONTINUE] Executing (Team Lead) — Turn ${turnProgress}
 Goal: ${goal}
 ${diffSection}
 You are the TEAM LEAD in the executing stage. Spawn teammates now.
@@ -203,7 +175,7 @@ Drive standby teammates yourself via message_teammate.`;
 			const ralphHint = prd
 				? `\nRalph mode active. Use oms-prd to manage stories; verify EACH acceptance criterion with fresh evidence before mark-passes.\n`
 				: '';
-			return `[OMS:CONTINUE] Executing — Turn ${turn}
+			return `[OMS:CONTINUE] Executing — Turn ${turnProgress}
 Goal: ${goal}
 ${diffSection}
 Tasks (${completedTasks.length}/${tasks.length}):
@@ -216,7 +188,7 @@ When all tasks are complete, call oms-set-stage { stage: "verifying" }.`;
 		case 'verifying': {
 			if (inTeamMode) {
 				// Team mode: lead merges all teammate work + verification ran unconditionally by runVerification
-				return `[OMS:CONTINUE] Verifying (Team Lead) — Turn ${turn}
+				return `[OMS:CONTINUE] Verifying (Team Lead) — Turn ${turnProgress}
 Goal: ${goal}
 ${diffSection}
 You are the TEAM LEAD in the verifying stage. Merge teammate work.
@@ -233,7 +205,7 @@ You are the TEAM LEAD in the verifying stage. Merge teammate work.
 Note: teammate-side verification is ineffective (teammates don't run onStop).
 Lead-side onStop is the single source of verification truth.`;
 			}
-			return `[OMS:CONTINUE] Verifying — Turn ${turn}
+			return `[OMS:CONTINUE] Verifying — Turn ${turnProgress}
 Goal: ${goal}
 ${diffSection}
 Review the changes above.
@@ -244,7 +216,7 @@ Review the changes above.
 		case 'done':
 			// Session is complete — don't continue (unless build failed → force-transition handled below)
 			if (inTeamMode) {
-				return `[OMS:CONTINUE] Done (Team Lead) — Turn ${turn}
+				return `[OMS:CONTINUE] Done (Team Lead) — Turn ${turnProgress}
 Goal: ${goal}
 Team work complete. Call \`team-cleanup_team\` to reclaim all worktrees + branches.`;
 			}
@@ -344,7 +316,23 @@ async function main() {
 
 	const state = loadState();
 	if (!state) {
-		// No active OMS session — let the conversation end
+		// Phase 2 US-004: 区分三种情况, loadState 对 expired/corrupt 都返回 null,
+		// 用 inspectStateFile 决定 stderr 该写哪条提示, 让用户能区分过期/损坏/无会话.
+		const status = inspectStateFile();
+		if (status === 'expired') {
+			// 僵尸态 (>2h 无活跃) — 明确提示后 exit 0, 不刷屏
+			process.stderr.write(
+				`[OMS:STATE EXPIRED] Session state is stale (no activity > 2h), ralph loop stopped.\n` +
+				`Run oms-stop to clean up, or /oms:goal again with a fresh session.\n`
+			);
+		} else if (status === 'corrupt') {
+			// JSON 解析失败 (torn write / 手动编辑损坏) — 区别于 EXPIRED 避免误报
+			process.stderr.write(
+				`[OMS:STATE CORRUPT] state.json exists but is unreadable (torn write or manual edit).\n` +
+				`Run oms-stop to clean up and restart.\n`
+			);
+		}
+		// 'absent' (无 state.json) 或上面两种: 都 exit 0 让对话结束
 		process.exit(0);
 	}
 
@@ -396,27 +384,38 @@ async function main() {
 		process.exit(2);
 	}
 
-	// Prevent infinite loops — hard stop after grace period, soft warning at limit
-	const MAX_TURNS = 50;
-	const HARD_STOP = MAX_TURNS + 5; // 5 grace turns to wrap up
+	// ── Iteration caps (anti-forge/staleness/soft-max patch, plan US-002) ──
+	// Old fixed MAX_TURNS=50 / HARD_STOP=55 replaced with dynamic caps stored
+	// on state. Soft cap auto-extends +10 on hit ("boulder keeps rolling");
+	// only hard cap is a true stop. Defaults backfilled by loadState (50/200)
+	// so legacy state.json without these fields still works.
+	const maxIter = state.maxIterations ?? 50;
+	const hardMax = state.hardMaxIterations ?? 200;
 
-	// Hard stop: end the conversation entirely (fail-open)
-	if (state.turnCount > HARD_STOP) {
-		process.stderr.write('[OMS:HARD STOP] Session force-stopped after exceeding maximum turns.');
+	// Hard stop: end the conversation entirely (fail-open). The only true stop
+	// besides explicit oms-stop / oms-set-stage:done. turnCount > hardMax means
+	// even with soft-cap extensions the loop ran past the hard ceiling.
+	if (state.turnCount > hardMax) {
+		const hardStopMsg =
+			`[OMS:HARD STOP] Reached hard max iterations (${hardMax}). Session force-stopped.\n` +
+			`Goal: ${state.goal}\n` +
+			`Stage: ${state.stage}\n` +
+			`Run oms-stop to clean up, or /oms:goal again with a fresh session.`;
+		process.stderr.write(hardStopMsg);
 		process.exit(0);
 	}
 
-	// Soft warning: inject a wrap-up message, but let the AI continue
-	if (state.turnCount > MAX_TURNS) {
-		const maxTurnsMsg =
-			`[OMS:MAX TURNS] Reached ${MAX_TURNS} turns. Stopping to prevent infinite loop.\n\n` +
-			`Goal: ${state.goal}\n` +
-			`Stage: ${state.stage}\n` +
-			`Tasks: ${state.tasks.filter(t => t.completed).length}/${state.tasks.length} completed\n\n` +
-			`Please wrap up your current work. Call oms-set-stage { stage: "done" } if you are finished, or oms-stop to end the session.\n` +
-			`Note: The session will be force-stopped at turn ${HARD_STOP}.`;
-		process.stderr.write(maxTurnsMsg);
-		process.exit(2);
+	// Soft cap reached: extend +10 and keep the boulder rolling. NOT a stop.
+	// omc ralph's "boulder never stops" philosophy — only hardMax truly ends.
+	// We saveState the new cap so the extension persists across turns, then
+	// fall through to normal continuation injection.
+	let extendedNote = '';
+	if (state.turnCount > maxIter) {
+		const oldMax = maxIter;
+		state.maxIterations = maxIter + 10;
+		saveState(state);
+		extendedNote =
+			`[OMS:EXTENDED] Reached soft cap ${oldMax} turns, extending to ${state.maxIterations}. Boulder keeps rolling.\n\n`;
 	}
 
 	// Get git diff
@@ -451,6 +450,10 @@ async function main() {
 	}
 
 	// Exit code 2: inject user message + continue conversation
+	// Prepend extended-cap note (if soft cap was hit this turn) to the prompt.
+	if (extendedNote) {
+		prompt = extendedNote + prompt;
+	}
 	process.stderr.write(prompt);
 	process.exit(2);
 }

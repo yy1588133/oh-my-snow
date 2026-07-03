@@ -17,7 +17,7 @@
 		"build": "tsc",
 		"dev": "tsc --watch",
 		"start": "node dist/mcp-server.js",
-		"test": "node test/test-hooks.mjs && node test/test-v2-hooks.mjs && node test/test-mcp.mjs && node test/test-skill-evolution.mjs && node test/test-review-fixes.mjs && node test/test-prd-fixes.mjs",
+		"test": "node test/test-hooks.mjs && node test/test-v2-hooks.mjs && node test/test-mcp.mjs && node test/test-skill-evolution.mjs && node test/test-review-fixes.mjs && node test/test-prd-fixes.mjs && node test/test-iteration-limits.mjs && node test/test-state-expire.mjs && node test/test-prd-verification.mjs && node test/test-completion-gate.mjs",
 		"prepublishOnly": "npm run build && npm test"
 	},
 	"keywords": [

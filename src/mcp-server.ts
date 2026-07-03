@@ -46,6 +46,10 @@ import {
 	logProgress,
 	readProgress,
 	deletePrd,
+	hasMatchingApproval,
+	requestVerification,
+	submitApproval,
+	getPendingVerification,
 	type RefinedStoryInput,
 } from './state/store.js';
 import {writeFileSync, mkdirSync} from 'fs';
@@ -253,6 +257,31 @@ server.registerTool(
 						{
 							type: 'text' as const,
 							text: 'No active OMS session. Call oms-start first.',
+						},
+					],
+					isError: true,
+				};
+			}
+
+			// Completion gate (Phase 3 US-006, AC1.11 — R11 真闭环): transitioning
+			// to 'done' requires an approved completion-scope verification. Without
+			// this gate, AI could call oms-set-stage {stage:"done"} and bypass the
+			// whole verification layer (the v2 plan's critical hole — it only added
+			// oms-prd actions without gating the stage transition).
+			// 过渡期豁免: verification-state.json 不存在时 hasMatchingApproval returns
+			// true (老会话放行). forceSetStage (done→executing build-fail 回退) 不走这个
+			// 工具层, 用 store.forceSetStage 直调, 所以也不受 gate 影响 (AC1.11a).
+			if (params.stage === 'done' && !hasMatchingApproval(null, 'completion')) {
+				return {
+					content: [
+						{
+							type: 'text' as const,
+							text: '❌ Cannot transition to done — no approved completion verification.\n\n' +
+								'Before marking the session done, request a completion-scope review:\n' +
+								'  oms-prd action:"request-verification" storyId:null scope:"completion"\n' +
+								'Then have the reviewer approve via:\n' +
+								'  oms-prd action:"submit-approval" requestId:<token> verdict:"approved" reviewerAgentId:<id>\n' +
+								'Once approved, re-call oms-set-stage { stage: "done" }.',
 						},
 					],
 					isError: true,
@@ -803,13 +832,16 @@ ${patternsArr
 //   add-story      — add a new story discovered during implementation
 //   next-story     — get the highest-priority story with passes:false
 //   get-story      — read a story's full details + acceptance criteria
-//   mark-passes    — set a story's passes flag (true requires all criteria verified)
-//   unmark-passes  — revert passes to false (on reviewer rejection)
-//   verify-criterion — mark a single acceptance criterion as verified/unverified
+//   mark-passes    — set a story's passes flag (true requires all criteria verified + matching approval)
+//   unmark-passes  — revert passes to false (on reviewer rejection; also clears verification approval)
+//   verify-criterion — mark a single acceptance criterion as verified/unverified (auto-lift now requires matching approval)
 //   status        — get PRD completion summary
 //   init-progress — initialize progress.txt
 //   log-progress  — append a learning entry to progress.txt
 //   list          — list all stories with their passes status
+//   request-verification  — request a UUID-token verification (story or completion scope) for anti-forge review
+//   submit-approval       — submit reviewer verdict (approved/rejected) + reviewerAgentId (caller attribution)
+//   get-pending-verification — read the current verification state (audit)
 
 server.registerTool(
 	'oms-prd',
@@ -831,6 +863,9 @@ server.registerTool(
 					'init-progress',
 					'log-progress',
 					'list',
+					'request-verification',
+					'submit-approval',
+					'get-pending-verification',
 				])
 				.describe('The PRD action to perform'),
 			task: z
@@ -890,6 +925,36 @@ server.registerTool(
 				.string()
 				.optional()
 				.describe('Progress entry text — required for "log-progress"'),
+			scope: z
+				.enum(['story', 'completion'])
+				.optional()
+				.describe(
+					'Verification scope — required for "request-verification". "story" = single story (pass storyId), "completion" = whole-session sign-off (storyId:null).',
+				),
+			requestId: z
+				.string()
+				.optional()
+				.describe(
+					'UUID verification token — required for "submit-approval" (must match the token returned by request-verification).',
+				),
+			verdict: z
+				.enum(['approved', 'rejected'])
+				.optional()
+				.describe('Reviewer verdict — required for "submit-approval"'),
+			feedback: z
+				.string()
+				.optional()
+				.describe('Reviewer feedback text — required for "submit-approval"'),
+			reviewerAgentId: z
+				.string()
+				.optional()
+				.describe(
+					'Which reviewer agent submitted the approval (caller attribution audit, AC1.12) — required for "submit-approval"',
+				),
+			criticTier: z
+				.string()
+				.optional()
+				.describe('Critic tier used for the review (architect/critic/codex) — optional for "submit-approval"'),
 		},
 	},
 	params => {
@@ -1489,6 +1554,176 @@ server.registerTool(
 												`  [${s.passes ? '✓' : '○'}] ${s.id} [P${s.priority}]: ${s.title}`,
 										)
 										.join('\n'),
+							},
+						],
+					};
+				}
+
+				// Phase 3 US-007: request-id anti-forge actions.
+				// Flow: request-verification (get UUID token) → reviewer signs off →
+				// submit-approval (record verdict + reviewerAgentId) → mark-passes /
+				// oms-set-stage:done (gates check hasMatchingApproval). The token is
+				// unguessable, so an AI that didn't actually call a reviewer can't fake
+				// an approval.
+				case 'request-verification': {
+					if (!params.scope) {
+						return {
+							content: [
+								{
+									type: 'text' as const,
+									text: 'Error: "scope" is required for "request-verification" (use "story" with storyId, or "completion" for whole-session sign-off).',
+								},
+							],
+							isError: true,
+						};
+					}
+					// story-scope requires a storyId; completion-scope requires null.
+					if (params.scope === 'story' && !params.storyId) {
+						return {
+							content: [
+								{
+									type: 'text' as const,
+									text: 'Error: "storyId" is required when scope="story". For whole-session sign-off use scope="completion" with storyId omitted.',
+								},
+							],
+							isError: true,
+						};
+					}
+					const storyId = params.scope === 'story' ? (params.storyId as string) : null;
+					const v = requestVerification(storyId, params.scope, params.criterionIndex ?? null);
+					return {
+						content: [
+							{
+								type: 'text' as const,
+								text:
+									`✅ Verification requested (scope: ${v.scope}).\n` +
+									`requestId: ${v.requestId}\n` +
+									`storyId: ${v.storyId ?? '(completion scope)'}\n\n` +
+									`Pass this requestId to the reviewer agent. After review, the reviewer calls:\n` +
+									`  oms-prd action:"submit-approval" requestId:"${v.requestId}" verdict:"approved|rejected" feedback:"..." reviewerAgentId:"<reviewer-id>"\n` +
+									`Once approved, mark-passes (story scope) or oms-set-stage:done (completion scope) will pass the no-approval gate.`,
+							},
+						],
+					};
+				}
+
+				case 'submit-approval': {
+					if (!params.requestId) {
+						return {
+							content: [
+								{
+									type: 'text' as const,
+									text: 'Error: "requestId" is required for "submit-approval". Call request-verification first.',
+								},
+							],
+							isError: true,
+						};
+					}
+					if (!params.verdict) {
+						return {
+							content: [
+								{
+									type: 'text' as const,
+									text: 'Error: "verdict" (approved|rejected) is required for "submit-approval".',
+								},
+							],
+							isError: true,
+						};
+					}
+					if (!params.feedback) {
+						return {
+							content: [
+								{
+									type: 'text' as const,
+									text: 'Error: "feedback" is required for "submit-approval" (reviewer must justify the verdict).',
+								},
+							],
+							isError: true,
+						};
+					}
+					if (!params.reviewerAgentId) {
+						return {
+							content: [
+								{
+									type: 'text' as const,
+									text: 'Error: "reviewerAgentId" is required for "submit-approval" (caller attribution audit — which reviewer agent signed off?).',
+								},
+							],
+							isError: true,
+						};
+					}
+					const result = submitApproval(
+						params.requestId,
+						params.verdict,
+						params.feedback,
+						params.reviewerAgentId,
+						params.criticTier ?? null,
+					);
+					if (!result.ok) {
+						// Map the four-gate failure reasons to actionable guidance.
+						const guidance: Record<string, string> = {
+							'mismatch': 'The requestId does not match the pending verification. Re-request and use the new token.',
+							'used': 'This verification was already resolved (approved/rejected) and cannot be reused. Re-request a new verification.',
+							'expired': 'This verification is past its TTL (30 min). Re-request a fresh verification.',
+							'max-attempts': 'Too many failed submit-approval attempts (reject count exceeded). Re-request a new verification to reset.',
+							'missing': 'No pending verification exists. Call request-verification first.',
+						};
+						return {
+							content: [
+								{
+									type: 'text' as const,
+									text: `❌ Approval rejected: ${result.reason}\n\n${guidance[result.reason] ?? ''}`,
+								},
+							],
+							isError: true,
+						};
+					}
+					return {
+						content: [
+							{
+								type: 'text' as const,
+								text:
+									`✅ Verification ${result.verification.status}.\n` +
+									`requestId: ${result.verification.requestId}\n` +
+									`scope: ${result.verification.scope}\n` +
+									`reviewerAgentId: ${result.verification.reviewerAgentId}\n` +
+									`attempts: ${result.verification.attempts}/${result.verification.maxAttempts}\n\n` +
+									(result.verification.status === 'approved'
+										? 'Approval recorded. The no-approval gate will now allow mark-passes / oms-set-stage:done.'
+										: 'Rejection recorded. The verification is reset to pending — re-request and re-review to proceed.'),
+							},
+						],
+					};
+				}
+
+				case 'get-pending-verification': {
+					const v = getPendingVerification();
+					if (!v) {
+						return {
+							content: [
+								{
+									type: 'text' as const,
+									text: 'No verification-state.json found (过渡期豁免 active — gates pass through). Call request-verification to start the verification flow.',
+								},
+							],
+						};
+					}
+					return {
+						content: [
+							{
+								type: 'text' as const,
+								text:
+									`Verification state:\n` +
+									`  requestId: ${v.requestId}\n` +
+									`  scope: ${v.scope}\n` +
+									`  storyId: ${v.storyId ?? '(completion)'}\n` +
+									`  status: ${v.status}\n` +
+									`  attempts: ${v.attempts}/${v.maxAttempts}\n` +
+									`  requestedAt: ${v.requestedAt}\n` +
+									`  resolvedAt: ${v.resolvedAt ?? '(pending)'}\n` +
+									`  reviewerAgentId: ${v.reviewerAgentId ?? '(none yet)'}\n` +
+									`  criticTier: ${v.criticTier ?? '(none)'}\n` +
+									`  feedback: ${v.reviewerFeedback ?? '(none)'}`,
 							},
 						],
 					};

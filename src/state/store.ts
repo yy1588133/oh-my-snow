@@ -22,6 +22,7 @@ import {
 	readdirSync,
 } from 'fs';
 import {join, dirname, basename} from 'path';
+import {randomUUID} from 'crypto';
 
 // ── Types ──
 
@@ -75,6 +76,20 @@ export interface OmsState {
 	 * this is a single reference field so oms-get-state can surface team context.
 	 */
 	teamName?: string;
+	/**
+	 * Soft iteration cap — when turnCount exceeds this, onStop extends it by
+	 * +10 and keeps the boulder rolling rather than stopping. Starts at 50.
+	 * See on-stop.mjs MAX_TURNS replacement. Added in the anti-forge/staleness/
+	 * soft-max patch (plan ralplan-oms-anti-forge-staleness-softmax.md).
+	 */
+	maxIterations: number;
+	/**
+	 * Hard iteration cap — the only true stop that ends the ralph loop
+	 * (besides explicit oms-stop / oms-set-stage:done). When turnCount exceeds
+	 * this, onStop force-stops. Defaults to 200 (aligned with omc strict mode).
+	 * Set to 0 for unlimited (omc default behavior) — not recommended.
+	 */
+	hardMaxIterations: number;
 }
 
 // ── Constants ──
@@ -128,6 +143,45 @@ export function loadState(): OmsState | null {
 		// The migration is persisted by the next saveState call from any mutation.
 		if ((state.stage as string) === 'idle') {
 			state.stage = 'planning';
+		}
+		// Backfill iteration caps for legacy state.json files created before the
+		// anti-forge/staleness/soft-max patch (plan ralplan-oms-anti-forge-
+		// staleness-softmax.md US-001). Old state lacks maxIterations/
+		// hardMaxIterations; without backfill every access would be NaN and the
+		// onStop soft-max comparison (turnCount > maxIterations) would misbehave.
+		// Defaults match createState. Persisted by the next saveState mutation.
+		if (state.maxIterations === undefined) {
+			state.maxIterations = 50;
+		}
+		if (state.hardMaxIterations === undefined) {
+			state.hardMaxIterations = 200;
+		}
+		// Staleness TTL (Phase 2 US-003): ralph 循环若中途崩溃留下僵尸 state,
+		// 老 state 永久驱动循环会空转。三时间戳取最新判断活跃度——单看
+		// state.updatedAt 会误杀长 PRD 循环会话 (setPrdStoryPasses/
+		// setCriterionVerified 只 savePrd 不 saveState, store.ts:1018/1090), 所以把
+		// prd.updatedAt 和 stageHistory 末尾也算进来。>2h 视为过期返回 null。
+		// Must mirror oms-state.mjs loadState (double-write consistency).
+		const STALE_STATE_MS = 2 * 60 * 60 * 1000; // 2 hours, 对齐 omc
+		const t1 = state.updatedAt ? new Date(state.updatedAt).getTime() : 0;
+		const prd = loadPrd();
+		const t2 = prd && prd.updatedAt ? new Date(prd.updatedAt).getTime() : 0;
+		const hist = Array.isArray(state.stageHistory) ? state.stageHistory : [];
+		const lastHist = hist.length ? hist[hist.length - 1] : null;
+		const t3 = lastHist && lastHist.timestamp ? new Date(lastHist.timestamp).getTime() : 0;
+		const latestActivity = Math.max(t1, t2, t3);
+		if (latestActivity > 0 && Date.now() - latestActivity > STALE_STATE_MS) {
+			const ageMin = Math.round((Date.now() - latestActivity) / 60000);
+			try {
+				const logPath = join(getStateDir(), 'errors.log');
+				const timestamp = new Date().toISOString();
+				appendFileSync(
+					logPath,
+					`[${timestamp}] loadState: stale state ignored (age ${ageMin}min > ${STALE_STATE_MS / 60000}min)\n`,
+					'utf-8',
+				);
+			} catch {}
+			return null;
 		}
 		return state;
 	} catch {
@@ -375,6 +429,9 @@ export function deleteState(): void {
 	}
 	// Clean up lock + PID-suffixed tmp files from saveState.
 	cleanupTmpFiles(filePath);
+	// Phase 3 US-007: also clear verification-state.json on oms-stop so a
+	// fresh session doesn't inherit a stale approval from the prior run.
+	deleteVerificationState();
 }
 
 // ── State mutations ──
@@ -393,6 +450,11 @@ export function createState(goal: string, verifyCommand: string): OmsState {
 		snapshots: [],
 		createdAt: now,
 		updatedAt: now,
+		// Soft/hard iteration caps (anti-forge/staleness/soft-max patch).
+		// Soft cap auto-extends +10 on hit; hard cap is the true stop. See
+		// hooks/on-stop.mjs MAX_TURNS replacement logic.
+		maxIterations: 50,
+		hardMaxIterations: 200,
 	};
 	saveState(state);
 	return state;
@@ -939,7 +1001,7 @@ export type SetPrdStoryPassesResult =
 	| {ok: true; story: PrdStory}
 	| {
 			ok: false;
-			reason: 'missing-prd' | 'missing-story' | 'guard';
+			reason: 'missing-prd' | 'missing-story' | 'guard' | 'no-approval';
 			/** verified/total criteria at refusal — only meaningful for reason:'guard' */
 			verifiedCount?: number;
 			totalCount?: number;
@@ -999,6 +1061,15 @@ export function setPrdStoryPasses(
 	if (passes && (totalCount === 0 || verifiedCount !== totalCount)) {
 		return {ok: false, reason: 'guard', verifiedCount, totalCount};
 	}
+	// No-approval gate (Phase 3 US-006, AC1.5): mark-passes(true) requires a
+	// matching APPROVED verification (reviewer sign-off via submit-approval).
+	// This is the anti-self-approval core — an AI can't rubber-stamp a story
+	// without first requesting verification and getting a reviewer to approve.
+	// 过渡期豁免 (R1): verification-state.json 不存在时 hasMatchingApproval returns
+	// true (老会话放行); file exists but no matching approved → 'no-approval' refuse.
+	if (passes && !hasMatchingApproval(storyId, 'story')) {
+		return {ok: false, reason: 'no-approval'};
+	}
 	story.passes = passes;
 	if (passes) {
 		// Re-passing clears any prior veto — the story is back to a clean pass.
@@ -1013,6 +1084,10 @@ export function setPrdStoryPasses(
 			c.verified = false;
 		}
 		story.rejected = true;
+		// R9: 同步清 verification-state.json 的 approval (cross-reject 复用防御).
+		// 在同一函数内调 (不跨函数, 缩小 TOCTOU — R7), 把 status 复位 pending +
+		// 清 approval 字段, 防止 AI 拿旧 approval 重新 mark-passes 跳过重新验证.
+		clearVerificationOnReject();
 	}
 	story.updatedAt = new Date().toISOString();
 	savePrd(prd);
@@ -1079,11 +1154,19 @@ export function setCriterionVerified(
 	// (mark-passes(true) is the only path that can set passes=true on a loaded
 	// story). This term stays as a belt-and-suspenders safeguard against a
 	// future change that relaxes the out-of-range check.
+	//
+	// R8 修复 (Phase 3 US-006, AC1.5a): auto-lift 加 no-approval gate. 原方案只
+	// gate mark-passes, 但 auto-lift (这里) 直接设 passes=true 完全跳过 gate, 整个
+	// 防伪层形同虚设. 现在 hasMatchingApproval 校验: 有匹配 approved 才 auto-lift,
+	// 否则只设 verified=true 不自动 passes, 迫使走显式 mark-passes(true).
+	// 过渡期豁免: verification-state.json 不存在时 hasMatchingApproval returns true,
+	// 老会话 auto-lift 保持原行为.
 	if (
 		verified &&
 		!story.rejected &&
 		story.acceptanceCriteria.length > 0 &&
-		story.acceptanceCriteria.every(c => c.verified)
+		story.acceptanceCriteria.every(c => c.verified) &&
+		hasMatchingApproval(storyId, 'story')
 	) {
 		story.passes = true;
 	}
@@ -1231,4 +1314,370 @@ export function deletePrd(): void {
 	// Clean up lock + PID-suffixed tmp files from savePrd (shared helper so the
 	// rule stays in sync with deleteState's cleanup).
 	cleanupTmpFiles(prdPath);
+}
+
+// ── Verification State (Phase 3 US-005/006: request-id anti-forge) ──
+//
+// Purpose: 堵死 AI self-approval attack (AI 自己调 mark-passes 而不经 reviewer).
+// 流程: AI 调 requestVerification 拿 UUID 令牌 → reviewer 带 requestId 审 →
+// submitApproval 写 approved (带 reviewerAgentId 调用者归属审计) → mark-passes/
+// auto-lift 的 no-approval gate 校验 hasMatchingApproval 才放行.
+//
+// 过渡期豁免 (R1): verification-state.json 不存在时 gate 不触发, 老会话原行为.
+// forceSetStage 豁免 completion gate (AC1.11a): build 失败 done→executing 回退不被拦.
+
+/** Verification scope — story-level vs whole-completion. */
+export type VerificationScope = 'story' | 'completion';
+
+/** Verification status lifecycle. */
+export type VerificationStatus = 'pending' | 'approved' | 'rejected';
+
+/**
+ * A single verification request record. Lives in verification-state.json.
+ * Only ONE pending verification at a time (most recent overwrites); approved/
+ * rejected records are kept for audit (reviewerAgentId traces which reviewer
+ * agent signed off — AC1.12, the structured-caller-attribution advantage tool-
+ * based anti-forge has over omc's transcript scan).
+ */
+export interface VerificationState {
+	/** UUID token — must match submit-approval's requestId (anti-forge). */
+	requestId: string;
+	/** Story id, or null for completion scope. */
+	storyId: string | null;
+	/** Criterion index within the story (optional, for story-scope granularity). */
+	criterionIndex: number | null;
+	/** Story-level vs whole-completion verification. */
+	scope: VerificationScope;
+	/** Current status of this verification. */
+	status: VerificationStatus;
+	/** How many submit-approval attempts have been made (reject increments). */
+	attempts: number;
+	/** Max attempts before the verification is locked (max-attempts gate). */
+	maxAttempts: number;
+	/** When the request was created (TTL clock starts here). */
+	requestedAt: string;
+	/** When the verification was resolved (approved/rejected), or null if pending. */
+	resolvedAt: string | null;
+	/** Reviewer feedback from the approval/rejection verdict. */
+	reviewerFeedback: string | null;
+	/** Critic tier used for the review (architect/critic/codex). */
+	criticTier: string | null;
+	/** Which reviewer agent submitted the approval (caller attribution, AC1.12). */
+	reviewerAgentId: string | null;
+}
+
+/**
+ * TTL for a verification request — requests older than this are stale (expired
+ * gate). TTL clock starts at requestedAt (not resolvedAt), so a slow review that
+ * takes longer than TTL will be rejected even on first submit (reviewer M2).
+ * 2h chosen (aligned with state staleness STALE_STATE_MS) — 30min was too tight
+ * for thorough architect reviews and would false-positive kill legitimate slow
+ * reviews. The TTL bounds reuse-window AND submit-window; both reset on a fresh
+ * requestVerification call.
+ */
+const VERIFICATION_TTL_MS = 2 * 60 * 60 * 1000; // 2 hours, 对齐 state 过期
+/** Max submit-approval attempts before lockout (max-attempts gate). */
+const VERIFICATION_MAX_ATTEMPTS = 3;
+
+function getVerificationFilePath(): string {
+	return join(getStateDir(), 'verification-state.json');
+}
+
+/**
+ * Load verification-state.json. Returns null if the file does not exist.
+ *
+ * IMPORTANT (过渡期豁免 R1): null return is the "no verification layer active"
+ * signal — hasMatchingApproval treats null as "豁免, 按老逻辑放行". A file that
+ * exists but is empty/corrupt returns null too, but that's rare (atomicWriteFile
+ * keeps it whole). The distinction matters: gate only fires when the file EXISTS
+ * but lacks a matching approved record.
+ */
+export function loadVerificationState(): VerificationState | null {
+	const filePath = getVerificationFilePath();
+	if (!existsSync(filePath)) {
+		return null;
+	}
+	try {
+		const content = readFileSync(filePath, 'utf-8');
+		const v = JSON.parse(content) as VerificationState;
+		// Backfill null fields for forward-compat (older records may lack fields
+		// added later — treat absent as the safe default rather than crashing).
+		if (v.attempts === undefined) v.attempts = 0;
+		if (v.maxAttempts === undefined) v.maxAttempts = VERIFICATION_MAX_ATTEMPTS;
+		if (v.criterionIndex === undefined) v.criterionIndex = null;
+		if (v.reviewerFeedback === undefined) v.reviewerFeedback = null;
+		if (v.criticTier === undefined) v.criticTier = null;
+		if (v.reviewerAgentId === undefined) v.reviewerAgentId = null;
+		if (v.resolvedAt === undefined) v.resolvedAt = null;
+		return v;
+	} catch {
+		return null;
+	}
+}
+
+function saveVerificationState(v: VerificationState): void {
+	atomicWriteFile(getVerificationFilePath(), JSON.stringify(v, null, 2));
+}
+
+/** Check if a verification approval is stale (past TTL). */
+function isVerificationExpired(v: VerificationState): boolean {
+	// TTL clock starts at requestedAt. An approved record that's been approved
+	// for >TTL is also expired (prevents resurrecting an old approval).
+	const requested = v.requestedAt ? new Date(v.requestedAt).getTime() : 0;
+	if (requested === 0) return true;
+	return Date.now() - requested > VERIFICATION_TTL_MS;
+}
+
+/**
+ * Result of a submit-approval attempt. `reason` explains which gate failed:
+ *   - 'mismatch'      : requestId doesn't match the pending request's token
+ *   - 'used'          : request already resolved (approved/rejected), can't reuse
+ *   - 'expired'       : request past TTL
+ *   - 'max-attempts'  : too many failed submit attempts
+ *   - 'missing'       : no pending verification (file exists but no record)
+ *
+ * NOTE: scope cross-wiring (story-scope approval used for completion gate and
+ * vice versa) is NOT checked here — submitApproval only has the requestId, not
+ * the caller's expected scope. Scope is enforced at the GATE layer by
+ * hasMatchingApproval, which compares the caller's requested scope against the
+ * verification record's scope (R6). This keeps submitApproval's job narrow
+ * (validate the token + verdict) and centralizes scope enforcement in one place.
+ */
+export type SubmitApprovalResult =
+	| {ok: true; verification: VerificationState}
+	| {ok: false; reason: 'mismatch' | 'used' | 'expired' | 'max-attempts' | 'missing'};
+
+/**
+ * Request a new verification. Generates a UUID token and writes a pending record.
+ * Overwrites any existing pending request (only one pending at a time).
+ *
+ * @param storyId    Story id, or null for completion scope.
+ * @param scope      'story' or 'completion'.
+ * @param criterionIndex Optional criterion index within the story.
+ */
+export function requestVerification(
+	storyId: string | null,
+	scope: VerificationScope,
+	criterionIndex: number | null = null,
+): VerificationState {
+	const now = new Date().toISOString();
+	// Detect overwrite of an existing pending request (reviewer M3): only one
+	// pending verification at a time, so a new request silently supersedes the
+	// prior. Log the supersession so the audit trail shows why a prior requestId
+	// would now mismatch (its holder gets 'mismatch' on submit). We do NOT refuse
+	// the overwrite — re-request is a valid recovery from a lost/stuck token — but
+	// the log gives post-hoc visibility into the supersession.
+	const existing = loadVerificationState();
+	if (existing && existing.status === 'pending' && existing.requestId) {
+		try {
+			const logPath = join(getStateDir(), 'errors.log');
+			const timestamp = new Date().toISOString();
+			appendFileSync(
+				logPath,
+				`[${timestamp}] requestVerification: superseded pending request ${existing.requestId} (storyId=${existing.storyId}, scope=${existing.scope}) with new request for storyId=${storyId}, scope=${scope}\n`,
+				'utf-8',
+			);
+		} catch {}
+	}
+	const v: VerificationState = {
+		requestId: randomUUID(),
+		storyId,
+		criterionIndex,
+		scope,
+		status: 'pending',
+		attempts: 0,
+		maxAttempts: VERIFICATION_MAX_ATTEMPTS,
+		requestedAt: now,
+		resolvedAt: null,
+		reviewerFeedback: null,
+		criticTier: null,
+		reviewerAgentId: null,
+	};
+	saveVerificationState(v);
+	return v;
+}
+
+/**
+ * Submit an approval/rejection verdict for a verification request.
+ *
+ * Four-gate check (AC1.3):
+ *   1. File must exist & have a record (missing)
+ *   2. requestId must match the pending token (mismatch) — anti-forge core
+ *   3. Request must still be pending, not already resolved (used)
+ *   4. Request must not be past TTL (expired)
+ *   5. attempts must be under maxAttempts (max-attempts)
+ *   6. storyId/scope must match the request (scope-mismatch)
+ *
+ * On success: writes verdict + reviewerFeedback + reviewerAgentId (caller
+ * attribution, AC1.12). On reject verdict: increments attempts (toward
+ * max-attempts lockout).
+ */
+export function submitApproval(
+	requestId: string,
+	verdict: 'approved' | 'rejected',
+	feedback: string,
+	reviewerAgentId: string,
+	criticTier: string | null = null,
+): SubmitApprovalResult {
+	const v = loadVerificationState();
+	if (!v) {
+		return {ok: false, reason: 'missing'};
+	}
+	// Gate 1: token mismatch — the anti-forge core. An AI that didn't call
+	// requestVerification can't know the requestId, so it can't fake an approval.
+	if (v.requestId !== requestId) {
+		return {ok: false, reason: 'mismatch'};
+	}
+	// Gate 2: already resolved (approved or rejected) — can't reuse a token.
+	if (v.status !== 'pending') {
+		return {ok: false, reason: 'used'};
+	}
+	// Gate 3: TTL expired.
+	if (isVerificationExpired(v)) {
+		return {ok: false, reason: 'expired'};
+	}
+	// Gate 4: max attempts (each rejected submit counts toward lockout).
+	if (v.attempts >= v.maxAttempts) {
+		return {ok: false, reason: 'max-attempts'};
+	}
+	// Scope cross-wiring (R6) is NOT checked here — submitApproval only has the
+	// requestId, not the caller's expected scope. Scope is enforced at the GATE
+	// layer by hasMatchingApproval (which compares the caller's requested scope
+	// against v.scope). See SubmitApprovalResult doc for rationale.
+
+	const now = new Date().toISOString();
+	// On reject: increment attempts but KEEP status pending (reviewer may re-
+	// review the same request until satisfied). Only the max-attempts gate
+	// (checked at the top of the NEXT submit) locks the request — at which
+	// point submit returns 'max-attempts' regardless of verdict. This makes
+	// max-attempts reachable & testable: a reviewer can reject up to maxAttempts
+	// times while the request stays pending, then the (maxAttempts+1)th submit
+	// is blocked. Approved resolves immediately (no retry needed).
+	if (verdict === 'rejected') {
+		v.attempts += 1;
+		v.reviewerFeedback = feedback;
+		v.reviewerAgentId = reviewerAgentId;
+		v.criticTier = criticTier;
+		// Don't set status='rejected' here — keep pending so reviewer can retry.
+		// The next submit's max-attempts gate is what finally locks it.
+		saveVerificationState(v);
+		return {ok: true, verification: v};
+	}
+	// Approved: resolve the verification.
+	v.status = 'approved';
+	v.resolvedAt = now;
+	v.reviewerFeedback = feedback;
+	v.criticTier = criticTier;
+	v.reviewerAgentId = reviewerAgentId;
+	saveVerificationState(v);
+	return {ok: true, verification: v};
+}
+
+/**
+ * Get the current pending (or last-resolved) verification record.
+ * Returns the record including reviewerAgentId for post-hoc audit (AC1.12).
+ */
+export function getPendingVerification(): VerificationState | null {
+	return loadVerificationState();
+}
+
+/**
+ * Does the verification state have a matching APPROVED record for the given
+ * story/scope? Used by the no-approval gates (US-006) to decide whether to
+ * allow mark-passes / auto-lift / completion-stage transition.
+ *
+ * Conditions for a match (AC1.5a):
+ *   - verification-state.json EXISTS (过渡期豁免: 不存在返回 true, 老会话放行)
+ *   - status === 'approved'
+ *   - scope === 'story' (completion-scope approvals don't authorize story auto-lift)
+ *   - storyId matches (when storyId arg is non-null)
+ *   - not past TTL
+ *
+ * @param storyId The story to check approval for. Pass null to check completion scope.
+ * @param scope   'story' (default) or 'completion'.
+ */
+export function hasMatchingApproval(
+	storyId: string | null,
+	scope: VerificationScope = 'story',
+): boolean {
+	const filePath = getVerificationFilePath();
+	const fileExists = existsSync(filePath);
+	const v = loadVerificationState();
+	// 过渡期豁免 (R1): verification-state.json 不存在 → 老会话, gate 不触发, 放行.
+	// 这是为了不破坏已有进行中的 ralph 会话 (它们没有 verification-state.json).
+	if (!fileExists) {
+		return true;
+	}
+	// Fail-closed (reviewer CRITICAL): 文件存在但 loadVerificationState 返回 null
+	// = JSON 损坏 (torn write / 手动编辑). 损坏文件不是"无文件豁免"语义, 而是活跃会话
+	// 上的完整性失败 — 必须拒, 不能放行. 否则一个损坏的 verification-state.json
+	// (可能由跨设备非原子写或崩溃产生) 会静默禁用整个防伪层, 无任何信号.
+	// 区分 absent (豁免) vs corrupt (fail-closed) 与 inspectStateFile 模式一致.
+	if (v === null) {
+		return false;
+	}
+	if (v.status !== 'approved') {
+		return false;
+	}
+	if (v.scope !== scope) {
+		return false;
+	}
+	if (scope === 'story') {
+		// storyId must match (both null is completion-scope, not story-scope).
+		if (storyId === null || v.storyId !== storyId) {
+			return false;
+		}
+	} else {
+		// completion scope: storyId should be null on both sides.
+		if (storyId !== null || v.storyId !== null) {
+			return false;
+		}
+	}
+	if (isVerificationExpired(v)) {
+		return false;
+	}
+	return true;
+}
+
+/**
+ * Clear the verification-state.json's approval on reject (R9).
+ * Resets status to pending and clears approval fields, so a cross-reject
+ * reuse of an old approval is blocked. Called by setPrdStoryPasses(id, false)
+ * in the same function (不跨函数, 缩小 TOCTOU — R7).
+ *
+ * NOTE: this does NOT delete the file (过渡期豁免 relies on file existence
+ * detection). It resets the record to a pending state so the next
+ * requestVerification overwrites it cleanly.
+ */
+export function clearVerificationOnReject(): void {
+	const v = loadVerificationState();
+	if (!v) {
+		return; // nothing to clear (过渡期豁免: file doesn't exist)
+	}
+	v.status = 'pending';
+	v.resolvedAt = null;
+	v.reviewerFeedback = null;
+	v.reviewerAgentId = null;
+	v.criticTier = null;
+	// Keep `attempts` (reviewer L1): attempts counts failed submit-approval
+	// attempts on THIS request token, not cross-story rejections. A story-level
+	// reject (setPrdStoryPasses(id,false) → this function) clears the approval
+	// so it can't be reused across rejects (R9), but does NOT reset the
+	// submit-attempt counter — if a reviewer already burned N submit attempts on
+	// this token, reusing the same token (without a fresh requestVerification)
+	// should still progress toward max-attempts lockout. A fresh
+	// requestVerification creates a new record with attempts=0, so legitimate
+	// re-review after story reject resets cleanly via re-request.
+	saveVerificationState(v);
+}
+
+/** Delete verification-state.json (called by oms-stop / deleteState cleanup). */
+export function deleteVerificationState(): void {
+	const filePath = getVerificationFilePath();
+	if (existsSync(filePath)) {
+		try {
+			unlinkSync(filePath);
+		} catch {}
+	}
+	cleanupTmpFiles(filePath);
 }

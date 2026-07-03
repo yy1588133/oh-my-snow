@@ -10,7 +10,7 @@
  * 6. appendErrorLog uses appendFileSync (atomicity)
  */
 
-import { execSync } from 'child_process';
+import { spawnSync, execSync } from 'child_process';
 import { join } from 'path';
 import { pathToFileURL } from 'url';
 import {
@@ -51,21 +51,20 @@ function readState() {
 }
 
 function runHook(script, stdinData) {
-	try {
-		const result = execSync(`node ${script}`, {
-			input: stdinData,
-			encoding: 'utf-8',
-			timeout: 10000,
-			cwd: process.cwd(),
-		});
-		return { exitCode: 0, stdout: result, stderr: '' };
-	} catch (e) {
-		return {
-			exitCode: e.status ?? -1,
-			stdout: e.stdout ?? '',
-			stderr: e.stderr ?? '',
-		};
-	}
+	// spawnSync captures stdout AND stderr separately regardless of exit code.
+	// execSync only surfaces stderr via the thrown error object on non-zero exit,
+	// which loses stderr for exit(0) cases (e.g. hard-stop). spawnSync fixes that.
+	const r = spawnSync('node', [script], {
+		input: stdinData,
+		encoding: 'utf-8',
+		timeout: 10000,
+		cwd: process.cwd(),
+	});
+	return {
+		exitCode: r.status,
+		stdout: r.stdout ?? '',
+		stderr: r.stderr ?? '',
+	};
 }
 
 const baseState = {
@@ -86,33 +85,36 @@ const baseState = {
 if (!existsSync(stateDir)) mkdirSync(stateDir, { recursive: true });
 
 // ──────────────────────────────────────────────────────────────
-// Test Gap 1: MAX_TURNS 2nd invocation — turnCount increments past 50
+// Test Gap 1: soft-cap extension (US-002) — turnCount increments past cap
 // ──────────────────────────────────────────────────────────────
 
-console.log('\n── Test Gap 1: MAX_TURNS 2nd invocation ──');
+console.log('\n── Test Gap 1: soft-cap extension 2nd invocation ──');
 
-// Turn 50 → should trigger MAX_TURNS warning (exit 2), but turnCount should increment to 51
+// Turn 50 (maxIter=50) → after ++ = 51 > 50 → soft-cap extension (exit 2),
+// maxIterations persisted to 60, turnCount = 51
 writeState({ ...baseState, stage: 'executing', turnCount: 50, tasks: [{ id: 'task_1', description: 'Test', completed: false }] });
 const r1a = runHook('hooks/on-stop.mjs', JSON.stringify({ messages: [] }));
-assert('MAX_TURNS at turnCount=50: exit 2', r1a.exitCode === 2, `got ${r1a.exitCode}`);
-assert('MAX_TURNS at turnCount=50: message delivered', r1a.stderr.includes('[OMS:MAX TURNS]'), r1a.stderr.slice(0, 200));
+assert('soft-cap at turnCount=50: exit 2', r1a.exitCode === 2, `got ${r1a.exitCode}`);
+assert('soft-cap at turnCount=50: [OMS:EXTENDED] message delivered', r1a.stderr.includes('[OMS:EXTENDED]'), r1a.stderr.slice(0, 200));
 
 // Verify turnCount was incremented to 51 (not stuck at 50)
 const stateAfter1a = readState();
-assert('MAX_TURNS: turnCount incremented past 50', stateAfter1a.turnCount === 51, `got ${stateAfter1a.turnCount}`);
+assert('soft-cap: turnCount incremented past 50 to 51', stateAfter1a.turnCount === 51, `got ${stateAfter1a.turnCount}`);
+assert('soft-cap: maxIterations extended 50→60', stateAfter1a.maxIterations === 60, `got ${stateAfter1a.maxIterations}`);
 
-// Turn 51 → should still trigger MAX_TURNS (but not be stuck in a loop)
+// Turn 51 (maxIter now 60) → ++ = 52 < 60 → normal continue, exit 2
 const r1b = runHook('hooks/on-stop.mjs', JSON.stringify({ messages: [] }));
-assert('MAX_TURNS at turnCount=51: exit 2', r1b.exitCode === 2, `got ${r1b.exitCode}`);
+assert('post-extension at turnCount=51: exit 2', r1b.exitCode === 2, `got ${r1b.exitCode}`);
 const stateAfter1b = readState();
-assert('MAX_TURNS: turnCount incremented to 52', stateAfter1b.turnCount === 52, `got ${stateAfter1b.turnCount}`);
+assert('post-extension: turnCount incremented to 52', stateAfter1b.turnCount === 52, `got ${stateAfter1b.turnCount}`);
 
-// Turn 55 → should hit HARD_STOP (exit 0, conversation ends)
-writeState({ ...baseState, stage: 'executing', turnCount: 55, tasks: [{ id: 'task_1', description: 'Test', completed: false }] });
+// Hard stop (US-002): low hardMax, turnCount > hardMax → exit 0
+writeState({ ...baseState, stage: 'executing', turnCount: 5, maxIterations: 3, hardMaxIterations: 5, tasks: [{ id: 'task_1', description: 'Test', completed: false }] });
 const r1c = runHook('hooks/on-stop.mjs', JSON.stringify({ messages: [] }));
-assert('HARD_STOP at turnCount=55: exit 0 (conversation ends)', r1c.exitCode === 0, `got ${r1c.exitCode}`);
+assert('hard-cap at turnCount=5 (hardMax=5): exit 0 (conversation ends)', r1c.exitCode === 0, `got ${r1c.exitCode}`);
+assert('hard-cap: [OMS:HARD STOP] message delivered', r1c.stderr.includes('[OMS:HARD STOP]'), r1c.stderr.slice(0, 200));
 const stateAfter1c = readState();
-assert('HARD_STOP: turnCount incremented to 56', stateAfter1c.turnCount === 56, `got ${stateAfter1c.turnCount}`);
+assert('hard-cap: turnCount incremented to 6', stateAfter1c.turnCount === 6, `got ${stateAfter1c.turnCount}`);
 
 // ──────────────────────────────────────────────────────────────
 // Test Gap 2: saveState lock contention — retry logic

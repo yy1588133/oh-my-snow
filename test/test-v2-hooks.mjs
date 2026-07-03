@@ -176,12 +176,14 @@ assert('onStop: marker cleaned up after build failure', !existsSync(join(stateDi
 // Verify that build failure context is NOT lost — continuation prompt should also be present
 assert('onStop: build failure includes continuation prompt', r15.stderr.includes('[OMS:CONTINUE]'), r15.stderr.slice(0, 500));
 
-// Test 15c: MAX_TURNS triggers exit(2) with wrap-up message
-writeState({ ...baseState, stage: 'executing', turnCount: 50, tasks: [{ id: 'task_1', description: 'Test task', completed: false }] });
+// Test 15c: Soft-cap extension (US-002) — turnCount > maxIter extends +10 and continues exit(2)
+// Old MAX_TURNS behavior replaced by dynamic soft-cap. Set a low maxIter so
+// turnCount=50 triggers extension (50 > 49 → extend to 59, keep rolling).
+writeState({ ...baseState, stage: 'executing', turnCount: 50, maxIterations: 49, hardMaxIterations: 200, tasks: [{ id: 'task_1', description: 'Test task', completed: false }] });
 const r15c = runHook('hooks/on-stop.mjs', JSON.stringify({ messages: [] }));
-assert('onStop: MAX_TURNS triggers exit 2', r15c.exitCode === 2, `got ${r15c.exitCode}`);
-assert('onStop: MAX_TURNS message delivered', r15c.stderr.includes('[OMS:MAX TURNS]'), r15c.stderr.slice(0, 200));
-assert('onStop: MAX_TURNS includes task summary', r15c.stderr.includes('0/1 completed'), r15c.stderr.slice(0, 300));
+assert('onStop: soft-cap extension triggers exit 2', r15c.exitCode === 2, `got ${r15c.exitCode}`);
+assert('onStop: soft-cap delivers [OMS:EXTENDED] message', r15c.stderr.includes('[OMS:EXTENDED]'), r15c.stderr.slice(0, 200));
+assert('onStop: soft-cap mentions extension to 59 (49+10)', r15c.stderr.includes('extending to 59'), r15c.stderr.slice(0, 300));
 
 // Test 15b: onStop auto-detects verifyCommand from verify.cmd file (avoids npm test recursion)
 writeState({ ...baseState, stage: 'executing', verifyCommand: '', turnCount: 1 });
@@ -287,23 +289,24 @@ writeState({ ...baseState, stage: 'planning' });
 const r25 = runHook('hooks/on-user-message.mjs', 'NOT VALID JSON {{{');
 assert('onUserMessage: malformed stdin = exit 0 (preserve message)', r25.exitCode === 0, `got ${r25.exitCode}`);
 
-// Test 26: Hard stop (turnCount=56) → stderr contains [OMS:HARD STOP]
-writeState({ ...baseState, stage: 'executing', turnCount: 56 });
+// Test 26: Hard stop (US-002) — turnCount > hardMax → exit 0 + [OMS:HARD STOP]
+// Set low hardMax so turnCount=6 (after ++=7) > hardMax=6 triggers true stop.
+writeState({ ...baseState, stage: 'executing', turnCount: 6, maxIterations: 3, hardMaxIterations: 6 });
 const r26 = runHook('hooks/on-stop.mjs', JSON.stringify({ messages: [] }));
 assert('onStop: hard stop = exit 0', r26.exitCode === 0, `got ${r26.exitCode}`);
 assert('onStop: hard stop = HARD STOP message', r26.stderr.includes('[OMS:HARD STOP]'), r26.stderr.slice(0, 200));
 
-// Test 27: Boundary — turnCount=54 → after increment = 55 → soft warning (exit 2)
-writeState({ ...baseState, stage: 'executing', turnCount: 54 });
+// Test 27: Soft-cap boundary (US-002) — turnCount=2 → after ++=3 > maxIter=2 → extend, exit 2
+writeState({ ...baseState, stage: 'executing', turnCount: 2, maxIterations: 2, hardMaxIterations: 100 });
 const r27 = runHook('hooks/on-stop.mjs', JSON.stringify({ messages: [] }));
-assert('onStop: turnCount 54→55 = soft warning exit 2', r27.exitCode === 2, `got ${r27.exitCode}`);
-assert('onStop: turnCount 54→55 = MAX TURNS message', r27.stderr.includes('[OMS:MAX TURNS]'), r27.stderr.slice(0, 200));
+assert('onStop: turnCount 2→3 > maxIter 2 = soft extension exit 2', r27.exitCode === 2, `got ${r27.exitCode}`);
+assert('onStop: turnCount 2→3 = [OMS:EXTENDED] message', r27.stderr.includes('[OMS:EXTENDED]'), r27.stderr.slice(0, 200));
 
-// Test 28: Boundary — turnCount=55 → after increment = 56 → hard stop (exit 0)
-writeState({ ...baseState, stage: 'executing', turnCount: 55 });
+// Test 28: Hard-cap boundary (US-002) — turnCount=3 → after ++=4 > hardMax=3 → hard stop exit 0
+writeState({ ...baseState, stage: 'executing', turnCount: 3, maxIterations: 2, hardMaxIterations: 3 });
 const r28 = runHook('hooks/on-stop.mjs', JSON.stringify({ messages: [] }));
-assert('onStop: turnCount 55→56 = hard stop exit 0', r28.exitCode === 0, `got ${r28.exitCode}`);
-assert('onStop: turnCount 55→56 = HARD STOP message', r28.stderr.includes('[OMS:HARD STOP]'), r28.stderr.slice(0, 200));
+assert('onStop: turnCount 3→4 > hardMax 3 = hard stop exit 0', r28.exitCode === 0, `got ${r28.exitCode}`);
+assert('onStop: turnCount 3→4 = HARD STOP message', r28.stderr.includes('[OMS:HARD STOP]'), r28.stderr.slice(0, 200));
 
 // Test 29: loadState with idle stage → in-memory migration, state.json NOT modified (no write)
 // Write state with 'idle' stage

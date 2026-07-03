@@ -78,13 +78,18 @@ For EACH acceptance criterion in the story, verify it is met with **fresh eviden
 - Run relevant checks (test, build, lint, typecheck) via terminal-execute and READ the output
 - For EACH criterion that passes, call `oms-prd` with `action: "verify-criterion"` and the story id + criterion index — this records the verification in `prd.json`. **This is the only way to set `verified=true`**; `mark-passes` will be REFUSED unless every criterion is already verified.
 - If ANY criterion is NOT met, continue working — do NOT mark the story complete, and do NOT call `verify-criterion` for the unmet criterion
-- NOTE: on a fresh (non-rejected) story, verifying the LAST criterion auto-lifts `passes=true` as a convenience. On a REJECTED story this auto-lift is blocked — you MUST end with an explicit `mark-passes` (see Step 5).
+- NOTE: on a fresh (non-rejected) story, verifying the LAST criterion auto-lifts `passes=true` — **but only if a matching reviewer approval exists** (Phase 3 anti-forge: auto-lift now requires `hasMatchingApproval`). On a REJECTED story auto-lift is always blocked. To get the approval that lets auto-lift fire, you must run the request-verification → submit-approval flow (see Step 5). On a fresh story with no `verification-state.json` yet, a transitional exemption keeps auto-lift working (old-session compatibility).
 
 ### Step 5 — Mark Story Complete
 
 When ALL acceptance criteria are verified (each has `verified=true` from Step 4):
 
-- Call `oms-prd` with `action: "mark-passes"` and the story id — confirms `passes: true`. This is a final sign-off, not a shortcut: the tool refuses the call if any criterion is still unverified, so you cannot rubber-stamp a story. This call also clears any prior `rejected` veto.
+**Anti-forge flow (Phase 3)** — `mark-passes(true)` now requires a matching APPROVED verification. You cannot self-approve; a reviewer must sign off via the token flow:
+
+1. **Request verification** — `oms-prd` with `action: "request-verification"`, `storyId: "<id>"`, `scope: "story"`. This returns a UUID `requestId` token. (Transitional exemption: if no `verification-state.json` exists, `mark-passes` passes through without the gate — but new sessions should use the flow.)
+2. **Hand the token to the reviewer** — when you spawn the reviewer agent (Step 7), pass the `requestId` so the reviewer can approve via `submit-approval`.
+3. **Reviewer approves** — the reviewer calls `oms-prd` with `action: "submit-approval"`, `requestId: "<token>"`, `verdict: "approved"`, `feedback: "<justification>"`, `reviewerAgentId: "<reviewer-id>"` (caller attribution audit). This records the approval in `verification-state.json`.
+4. **Mark passes** — now `oms-prd` with `action: "mark-passes"` and the story id succeeds. It's still refused if any criterion is unverified, and it also clears any prior `rejected` veto.
 - Call `oms-prd` with `action: "log-progress"` with a summary: what was implemented, files changed, learnings for future iterations
 - Add any discovered codebase patterns to `progress.txt`
 
@@ -105,9 +110,18 @@ Verify against the SPECIFIC acceptance criteria from `prd.json`, not vague "is i
 
 The reviewer verifies against the SPECIFIC acceptance criteria from `prd.json`.
 
+**Anti-forge sign-off (Phase 3)**: when you request verification in Step 5, you get a `requestId` token. Hand it to the reviewer. The reviewer's approval MUST go through `oms-prd action:"submit-approval"` with that `requestId` — this is what records a matching approval that lets `mark-passes`/auto-lift pass the no-approval gate. An AI cannot self-approve: it can't guess the UUID token without actually calling `request-verification` first, and the token binds to the story/scope.
+
+**Completion scope (when ALL stories pass)**: before transitioning to `done` via `oms-set-stage`, you need a **completion-scope** approval (not a per-story one):
+
+1. `oms-prd action:"request-verification" storyId:null scope:"completion"` → get a completion `requestId`.
+2. Reviewer verifies the WHOLE session against the PRD's acceptance criteria (not just one story).
+3. Reviewer calls `oms-prd action:"submit-approval" requestId:"<token>" verdict:"approved" feedback:"<session-level justification>" reviewerAgentId:"<id>"`.
+4. Now `oms-set-stage { stage: "done" }` passes the completion gate. Without the completion-scope approval, `oms-set-stage:done` is REFUSED (`reason: no-completion-approval`). The gate is in the tool layer — `forceSetStage` (build-fail `done→executing` rollback) is exempt, so build-failure recovery still works.
+
 **On APPROVAL**: proceed to **Step 7.5** in the same turn. Do NOT pause to report the verdict — reporting happens only at completion (Step 8) or on rejection (Step 9).
 
-**On REJECTION**: jump to **Step 9**.
+**On REJECTION**: jump to **Step 9**. A reject also clears the verification approval (so a stale approval can't be reused across rejects — the agent must re-request and re-review).
 
 ### Step 7.5 — Mandatory Deslop Pass
 
@@ -173,10 +187,13 @@ After Step 7.6 passes:
 | `add-story` | Add a new story discovered during implementation |
 | `next-story` | Get highest-priority story with passes:false |
 | `get-story` | Read a story's full details + acceptance criteria |
-| `verify-criterion` | Mark a SINGLE acceptance criterion verified=true with fresh evidence (the ONLY way to set verified). On a FRESH (non-rejected) story, verifying the LAST criterion auto-lifts `passes` to true as a convenience. On a REJECTED story (reviewer veto), auto-lift is blocked — you MUST end with an explicit `mark-passes`. |
-| `mark-passes` | Final confirmation of `passes:true`. REFUSED unless every criterion is already `verified` (enforced at the data layer) — so you MUST call `verify-criterion` for each criterion first. Also clears any prior `rejected` veto, returning the story to a clean pass. |
-| `unmark-passes` | Revert `passes` to false (on reviewer rejection). This is a REAL VETO: it clears every criterion's `verified` flag AND sets `rejected=true`, so the agent MUST re-verify EACH criterion with fresh evidence AND then call `mark-passes(true)` to re-pass — a bare mark-passes(true) without re-verification will be refused. |
+| `verify-criterion` | Mark a SINGLE acceptance criterion verified=true with fresh evidence (the ONLY way to set verified). On a FRESH (non-rejected) story, verifying the LAST criterion auto-lifts `passes` to true — **but only if a matching reviewer approval exists** (Phase 3: auto-lift now requires `hasMatchingApproval`; transitional exemption if no `verification-state.json`). On a REJECTED story (reviewer veto), auto-lift is blocked — you MUST end with an explicit `mark-passes`. |
+| `mark-passes` | Final confirmation of `passes:true`. REFUSED unless (a) every criterion is already `verified` AND (b) a matching APPROVED verification exists (`hasMatchingApproval` — Phase 3 anti-forge). Run the request-verification → submit-approval flow (Step 5) to get the approval. Also clears any prior `rejected` veto. Transitional exemption: if no `verification-state.json` exists, the gate passes through (old-session compat). |
+| `unmark-passes` | Revert `passes` to false (on reviewer rejection). This is a REAL VETO: it clears every criterion's `verified` flag AND sets `rejected=true` AND clears the verification approval (so a stale approval can't be reused across rejects). The agent MUST re-verify EACH criterion with fresh evidence AND re-request verification AND call `mark-passes(true)` to re-pass. |
 | `status` | Get PRD completion summary (X/Y stories, remaining) |
 | `init-progress` | Initialize progress.txt |
 | `log-progress` | Append a learning/progress entry to progress.txt |
 | `list` | List all stories with their passes status |
+| `request-verification` | Request a UUID-token verification for anti-forge review. Pass `storyId`+`scope:"story"` for per-story sign-off, or `storyId:null`+`scope:"completion"` for whole-session sign-off (required before `oms-set-stage:done`). Returns a `requestId` token to hand to the reviewer. |
+| `submit-approval` | Reviewer submits verdict (approved/rejected) for a `requestId`. Must pass `reviewerAgentId` (caller attribution audit — which reviewer signed off). Four-gate check: token mismatch / already-used / TTL-expired / max-attempts. On reject, attempts increment toward max-attempts lockout. |
+| `get-pending-verification` | Read the current verification state (requestId/status/reviewerAgentId/etc) for audit. Returns "transitional exemption active" if no `verification-state.json` exists. |

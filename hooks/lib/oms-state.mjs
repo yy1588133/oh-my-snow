@@ -90,10 +90,116 @@ export function loadState() {
 		if (state.stage === 'idle') {
 			state.stage = 'planning';
 		}
+		// Backfill iteration caps for legacy state.json (anti-forge/staleness/
+		// soft-max patch US-001). Must mirror store.ts loadState — both readers
+		// (MCP server via store.ts, hooks via this file) must agree, else hook
+		// and MCP would see different maxIterations for the same state.json.
+		if (state.maxIterations === undefined) {
+			state.maxIterations = 50;
+		}
+		if (state.hardMaxIterations === undefined) {
+			state.hardMaxIterations = 200;
+		}
+		// Staleness TTL (Phase 2 US-003): ralph 循环若中途崩溃留下僵尸 state,
+		// 老 state 永久驱动循环会空转。三时间戳取最新判断活跃度——单看
+		// state.updatedAt 会误杀长 PRD 循环会话 (setPrdStoryPasses/setCriterion
+		// Verified 只 savePrd 不 saveState), 所以把 prd.updatedAt 和 stageHistory
+		// 末尾也算进来。>2h 视为过期返回 null。Must mirror store.ts loadState.
+		const STALE_STATE_MS = 2 * 60 * 60 * 1000; // 2 hours, 对齐 omc
+		const t1 = state.updatedAt ? new Date(state.updatedAt).getTime() : 0;
+		const prd = loadPrd();
+		const t2 = prd && prd.updatedAt ? new Date(prd.updatedAt).getTime() : 0;
+		const hist = Array.isArray(state.stageHistory) ? state.stageHistory : [];
+		const lastHist = hist.length ? hist[hist.length - 1] : null;
+		const t3 = lastHist && lastHist.timestamp ? new Date(lastHist.timestamp).getTime() : 0;
+		const latestActivity = Math.max(t1, t2, t3);
+		if (latestActivity > 0 && Date.now() - latestActivity > STALE_STATE_MS) {
+			const ageMin = Math.round((Date.now() - latestActivity) / 60000);
+			try {
+				appendErrorLog(`loadState: stale state ignored (age ${ageMin}min > ${STALE_STATE_MS / 60000}min)`);
+			} catch {}
+			return null;
+		}
 		return state;
 	} catch {
 		return null;
 	}
+}
+
+/**
+ * Inspect the state.json file WITHOUT parsing/returning the state — returns a
+ * status string so on-stop.mjs (Phase 2 US-004) can distinguish three cases
+ * that all make loadState() return null:
+ *   - 'absent'   : state.json 不存在 (无活跃会话, 静默 exit 0)
+ *   - 'expired'  : state.json 存在且可解析, 但三时间戳都老 (>2h TTL) → 僵尸态
+ *                  → stderr [OMS:STATE EXPIRED] + exit 0
+ *   - 'corrupt'  : state.json 存在但 JSON 解析失败 (torn write / 手动编辑损坏)
+ *                  → stderr [OMS:STATE CORRUPT] + exit 0 (不误报 EXPIRED 误导用户)
+ *   - 'ok'       : state.json 存在且新鲜 (loadState 会返回非 null)
+ *
+ * loadState 对 'expired' 和 'corrupt' 都返回 null, on-stop 无法靠 loadState 区分,
+ * 所以单独调 inspectStateFile 决定 stderr 该写哪条提示。
+ *
+ * Must mirror the TTL logic in loadState above (three-timestamp max).
+ */
+export function inspectStateFile() {
+	const filePath = getStateFilePath();
+	if (!existsSync(filePath)) return 'absent';
+	let state;
+	try {
+		state = JSON.parse(readFileSync(filePath, 'utf-8'));
+	} catch {
+		return 'corrupt';
+	}
+	const STALE_STATE_MS = 2 * 60 * 60 * 1000;
+	const t1 = state.updatedAt ? new Date(state.updatedAt).getTime() : 0;
+	let prd = null;
+	try { prd = loadPrd(); } catch {}
+	const t2 = prd && prd.updatedAt ? new Date(prd.updatedAt).getTime() : 0;
+	const hist = Array.isArray(state.stageHistory) ? state.stageHistory : [];
+	const lastHist = hist.length ? hist[hist.length - 1] : null;
+	const t3 = lastHist && lastHist.timestamp ? new Date(lastHist.timestamp).getTime() : 0;
+	const latestActivity = Math.max(t1, t2, t3);
+	if (latestActivity > 0 && Date.now() - latestActivity > STALE_STATE_MS) {
+		return 'expired';
+	}
+	return 'ok';
+}
+
+/**
+ * Read-only PRD loader for hooks (Phase 2 US-003: extracted from on-stop.mjs:55-77
+ * so loadState can read prd.updatedAt for the three-timestamp staleness check
+ * without duplicating the read logic). Hooks must NOT mutate prd.json — writes
+ * go through the MCP oms-prd tool (backed by store.ts).
+ *
+ * Atomicity: store.ts writes prd.json via tmp+rename (atomic on the normal path).
+ * The ONLY non-atomic path is the cross-device fallback (renameSync EXDEV → direct
+ * writeFileSync), where a reader can catch a half-written file. We retry once after
+ * a short sleep to ride out that window. We do NOT retry on ENOENT (file deleted —
+ * not transient) — only on SyntaxError (partial/corrupt JSON).
+ */
+export function loadPrd() {
+	const prdPath = join(getStateDir(), 'prd.json');
+	if (!existsSync(prdPath)) return null;
+	for (let attempt = 0; attempt < 2; attempt++) {
+		try {
+			return JSON.parse(readFileSync(prdPath, 'utf-8'));
+		} catch (error) {
+			// ENOENT between the existsSync above and readFileSync means the
+			// file was deleted mid-read (e.g. deletePrd during oms-stop) — not
+			// transient, don't retry, just return null.
+			if (error && error.code === 'ENOENT') {
+				return null;
+			}
+			// SyntaxError (partial JSON from cross-device fallback) or other
+			// transient read error — retry once after a short sleep before
+			// giving up and dropping Ralph context from the continuation prompt.
+			if (attempt === 0) {
+				syncSleep(20);
+			}
+		}
+	}
+	return null;
 }
 
 export function ensureStateDir() {
