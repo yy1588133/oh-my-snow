@@ -14,6 +14,26 @@ This skill detects and removes redundant, duplicated, or low-quality code that o
 - Periodically as part of code maintenance
 - Before a release to ensure code quality
 
+## Scope & Safety
+
+**Scope.** This skill's "remove" / "cleanup" actions refer **only** to deleting redundant **lines or blocks of code inside source files** — never to deleting files, directories, or entire file contents.
+
+**Forbidden actions.** Do **not** execute any filesystem-deletion command while running this skill, including but not limited to:
+- `rm`, `rm -rf`, `rmdir`
+- PowerShell `Remove-Item`, `Remove-Item -Recurse -Force`
+- Windows `del`, `del /s`, `rd /s`
+- Node.js `fs.rm` / `fs.rmSync` with recursive options
+- Any equivalent that removes files or directories
+
+**Protected directories.** The following are essential operational state or configuration — they must **never** be deleted, renamed, or moved by this skill. If any appears to contain "redundant" files, do not touch it; flag the observation in the cleanup report for human review:
+- `.snow` (OMS / snow-cli runtime state)
+- `.git` (version control)
+- `node_modules` (dependencies)
+- `.omc`, `.claude` (orchestration state & skills)
+- Any `.env`, config, or lockfiles (`package-lock.json`, `pnpm-lock.yaml`, etc.)
+
+**When in doubt about a file or directory, keep it and flag it.** Deletion is reversible only via version control; assume it is not reversible.
+
 ## Procedure
 
 ### Step 1: Detect Redundant Code
@@ -55,16 +75,28 @@ Prioritize findings by impact:
 - **Medium** — Over-commenting, naming, magic numbers
 - **Low** — Stylistic inconsistencies
 
-### Step 5: Execute Cleanup
+### Step 5: Execute Cleanup — Action by Slop Type
 
-For each item in the cleanup plan:
+Each cleanup action must match the **type** of slop found. Do not run a single uniform "remove" pass. Use this mapping:
+
+| Slop type (from Steps 1–3) | Allowed action | Scope of "remove" |
+|---|---|---|
+| Dead code (unused fn/var/import) | **Remove dead code lines** | Delete the specific unused lines/blocks only |
+| Duplicate functions / boilerplate | **Consolidate** into one shared function | Delete the duplicates after extraction |
+| Over-abstraction (pass-through wrappers) | **Flatten** by inlining the wrapper | Delete the wrapper layer |
+| Over-commented code | **Remove** the redundant comments | Delete comment lines only |
+| Naming issues | **Rename** in place | No deletion of code |
+| Magic numbers | **Extract** named constant | Addition, not deletion |
+| Missing tests / weak coverage | **Add** tests | Addition, not deletion |
+| Structural (god files, mixed concerns) | **Split / move** code between files | Edit, not delete |
+
+For each item:
 1. **Read** the affected file(s) using `filesystem-read`
-2. **Verify** that the code is truly redundant by checking all references with `ace-search`
-3. **Remove or consolidate** the redundant code
-4. **Extract** shared logic into reusable functions
-5. **Rename** unclear variables and functions
-6. **Remove** unnecessary comments
-7. **Consolidate** error handling patterns
+2. **Verify** the code is truly redundant by checking ALL references with `ace-search`
+3. **Apply only the action allowed for that slop type** — never escalate to deleting files or directories
+4. **Run targeted verification** (build / tests / diagnostics) for the touched area before moving to the next item
+
+**Hard rule:** "Remove" in this step means deleting **code lines** inside a source file. It never means deleting files, directories, or running shell deletion commands (see Scope & Safety above).
 
 ### Step 6: Verify Changes
 
@@ -104,6 +136,8 @@ Produce a cleanup report:
 
 ## Rules
 
+- **Never execute filesystem-deletion commands** (`rm`, `Remove-Item`, `del`, `rd /s`, `fs.rm` recursive, etc.). This skill operates by editing source code, not by deleting files or directories. See Scope & Safety.
+- **Never delete protected directories** (`.snow`, `.git`, `node_modules`, `.omc`, `.claude`, config/lockfiles). If you suspect one contains slop, flag it in the report — do not delete.
 - Never remove code without checking ALL references first
 - Always run the build after cleanup
 - Preserve behavior — cleanup is refactoring, not feature removal
