@@ -117,7 +117,8 @@ via `askuser-ask_question` with these options:
 
 - Proceed to review — send to `#oms_architect` and `#oms_critic`
 - Request changes — return to step 1 with user feedback incorporated
-- Skip review — go directly to the approval gate (step 7)
+- Skip review — go directly to the approval gate (step 7); step 6 is a
+  no-op since no reviewer improvements were produced to merge
 
 Without `--interactive`, automatically proceed to review (step 3).
 
@@ -349,6 +350,6 @@ final approved plan is saved to `<slug>.md` (drop the `.draft` suffix).
 | `oms-set-stage` | Transition to `executing` AFTER approval (step 8) |
 | `oms-snapshot` | Save long-planning intermediate state |
 | `askuser-ask_question` | Approval gate + draft feedback + interview questions |
-| `#oms_researcher` | Codebase facts + external docs (Interview + Direct) |
+| `#oms_researcher` | Codebase facts + external docs (Interview step 2) |
 | `#oms_architect` | Architectural review (Consensus step 3) |
 | `#oms_critic` | Quality evaluation (Consensus step 4 + Review mode) |
