@@ -33,6 +33,7 @@ import {
 	cpSync,
 	rmSync,
 	readdirSync,
+	realpathSync,
 } from 'fs';
 import {join, dirname, resolve} from 'path';
 import {homedir} from 'os';
@@ -219,6 +220,55 @@ function setupMcpConfig(packageDir: string): void {
 
 // ── Setup: Sub-agents ──
 
+/**
+ * Pure field-level merge of OMS agents.
+ *
+ * Exported for testing. `tools` is preserved from the user's existing agent
+ * when present (and non-empty); all other fields (`name`, `description`,
+ * `role`, etc.) come from the package version so prompt fixes propagate.
+ * Non-OMS agents are passed through unchanged. Package agents without a
+ * matching user agent are added as-is.
+ */
+export function mergeOmsAgents(
+	existingAgents: Array<Record<string, unknown>>,
+	pkgAgents: Array<Record<string, unknown>>,
+): Array<Record<string, unknown>> {
+	const existingOmsById = new Map<string, Record<string, unknown>>();
+	for (const a of existingAgents) {
+		const id = String(a.id || '');
+		if (id.startsWith('oms_')) {
+			existingOmsById.set(id, a);
+		}
+	}
+
+	const nonOmsAgents = existingAgents.filter(
+		a => !String(a.id || '').startsWith('oms_'),
+	);
+
+	const mergedOmsAgents = pkgAgents.map(pkgAgent => {
+		const id = String(pkgAgent.id || '');
+		const userAgent = existingOmsById.get(id);
+		if (userAgent && Array.isArray(userAgent.tools) && userAgent.tools.length > 0) {
+			return { ...pkgAgent, tools: userAgent.tools };
+		}
+		return pkgAgent;
+	});
+
+	return [...nonOmsAgents, ...mergedOmsAgents];
+}
+
+/**
+ * Merge OMS agents into the user's ~/.snow/sub-agents.json.
+ *
+ * Field-level merge per agent id (see `mergeOmsAgents` for the contract):
+ * - `tools`: PRESERVED from the user's existing agent. This is the critical
+ *   customization surface — users may add project-specific MCP tools or
+ *   remove tools they don't want. `oms setup` must never clobber it.
+ * - `name` / `description` / `role`: UPDATED from the package so prompt
+ *   improvements propagate on every setup.
+ * - New package agents are added; deleted-by-user agents are reinstalled
+ *   (cannot distinguish "deleted on purpose" from "never installed").
+ */
 function setupSubAgents(packageDir: string): void {
 	const agentsPath = join(packageDir, 'assets', 'agents', 'sub-agents.json');
 	if (!existsSync(agentsPath)) {
@@ -233,28 +283,37 @@ function setupSubAgents(packageDir: string): void {
 	);
 	const omsAgents = agentsData.agents || [];
 
-	// Read existing sub-agents.json
+	// Read existing sub-agents.json (empty object if missing — see readJson).
 	const existing = readJson<{agents: Array<Record<string, unknown>>}>(
 		SUB_AGENTS_PATH,
 	);
 	const existingAgents = existing.agents || [];
 
-	// Filter out any existing oms_* agents to avoid duplicates
-	const nonOmsAgents = existingAgents.filter(
-		a => !String(a.id || '').startsWith('oms_'),
-	);
+	const mergedAgents = mergeOmsAgents(existingAgents, omsAgents);
 
-	// Merge: non-OMS agents + OMS agents
-	const merged = {
-		agents: [...nonOmsAgents, ...omsAgents],
-	};
+	writeJson(SUB_AGENTS_PATH, { agents: mergedAgents });
 
-	writeJson(SUB_AGENTS_PATH, merged);
+	// Count how many agents had their tool config preserved, for user feedback.
+	let preservedCount = 0;
+	const pkgOmsIds = new Set(omsAgents.map(a => String(a.id || '')));
+	for (const a of existingAgents) {
+		const id = String(a.id || '');
+		if (pkgOmsIds.has(id) && Array.isArray(a.tools) && a.tools.length > 0) {
+			preservedCount++;
+		}
+	}
 	console.log(
 		c.green(
 			t.subAgentsMerged(omsAgents.length, SUB_AGENTS_PATH),
 		),
 	);
+	if (preservedCount > 0) {
+		console.log(
+			c.dim(
+				`  Preserved tool config for ${preservedCount} customized OMS agent(s).`,
+			),
+		);
+	}
 }
 
 // ── Setup: Skills ──
@@ -685,26 +744,52 @@ ${c.bold(t.helpPrerequisites)}
 
 
 // ── CLI entry point ──
+// Only run when invoked directly via `oms <command>`, not when imported as a
+// module (e.g. by tests importing `mergeOmsAgents`).
+//
+// On Windows (and typically also macOS/Linux) npm installs globals as a
+// symlink: `<prefix>/node_modules/oh-my-snow` → real package dir. The npm
+// launcher (oms.cmd / oms shell script) passes the *symlink path* as
+// process.argv[1], but Node's ESM loader resolves the symlink first, so
+// import.meta.url points at the *real path*. `path.resolve()` does not
+// resolve symlinks, so the raw comparison would always be false under a
+// global install → `oms setup` silently does nothing (exit 0).
+//
+// Fix: realpathSync() both sides so symlinked and non-symlinked installs
+// compare equal. realpathSync the invoked path only if it exists (argv may
+// be a removed temp path or empty on some edge cases); realpathSync on
+// import.meta.url is always safe since the module is loaded.
+function isDirectInvocation(): boolean {
+	if (!process.argv[1]) return false;
+	const invokedRaw = resolve(process.argv[1]);
+	const invoked = existsSync(invokedRaw)
+		? realpathSync(invokedRaw).replace(/\\/g, '/')
+		: invokedRaw.replace(/\\/g, '/');
+	const here = realpathSync(fileURLToPath(import.meta.url)).replace(/\\/g, '/');
+	return invoked === here;
+}
 
-const command = process.argv[2]?.toLowerCase();
+if (isDirectInvocation()) {
+	const command = process.argv[2]?.toLowerCase();
 
-switch (command) {
-	case 'setup':
-	case 'install':
-		setup();
-		break;
-	case 'uninstall':
-	case 'remove':
-		uninstall();
-		break;
-	case 'help':
-	case '--help':
-	case '-h':
-	case undefined:
-		help();
-		break;
-	default:
-		console.error(c.red(`\n✖ ${t.errUnknownCommand(command)}\n`));
-		help();
-		process.exit(1);
+	switch (command) {
+		case 'setup':
+		case 'install':
+			setup();
+			break;
+		case 'uninstall':
+		case 'remove':
+			uninstall();
+			break;
+		case 'help':
+		case '--help':
+		case '-h':
+		case undefined:
+			help();
+			break;
+		default:
+			console.error(c.red(`\n✖ ${t.errUnknownCommand(command)}\n`));
+			help();
+			process.exit(1);
+	}
 }

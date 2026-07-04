@@ -158,22 +158,22 @@ Each agent ships with a structured `role` prompt adapted from [oh-my-claudecode]
 
 **Mapping to omc roles**: `oms_architect`→architect, `oms_reviewer`→code-reviewer, `oms_tester`→test-engineer, `oms_security`→security-reviewer, `oms_ds`→scientist, `oms_docs`→writer, `oms_evaluator`→verifier, `oms_critic`→critic, `oms_designer`→designer, `oms_researcher`→explore+scientist+document-specialist. The role-specialized agents (`oms_frontend`, `oms_backend`, `oms_database`, `oms_api`, `oms_devops`, `oms_optimizer`, `oms_migrator`, `oms_summarizer`) use the executor pattern with domain-specific protocols.
 
-Tool names and collaboration references are adapted to snow-cli: `Glob/Grep/Read`→`filesystem-read`+`ace-search`, `Write/Edit`→`filesystem-create/edit/replaceedit`, `Bash`→`terminal-execute`, `lsp_diagnostics*`→`ide-get_diagnostics`, `Task(subagent_type=...)`→`#oms_<name>`, `/team`→`/oms:team`.
+Tool names and collaboration references are adapted to snow-cli: `Glob/Grep/Read`→`filesystem-read`+`ace-search`, `Write/Edit`→`filesystem-create/edit/replaceedit`, `Bash`→`terminal-execute`, `lsp_diagnostics*`→`ide-get_diagnostics`, `WebSearch/WebFetch`→`websearch-search`/`websearch-fetch`, `Task(subagent_type=...)`→`#oms_<name>`, `/team`→`/oms:team`.
 
 | Agent            | Specialization                                             | Tools                                                           |
 | ---------------- | ---------------------------------------------------------- | --------------------------------------------------------------- |
-| `oms_architect`  | System architecture design and review                      | filesystem-read, codebase-search, ace-search                    |
+| `oms_architect`  | System architecture design and review                      | filesystem-read, codebase-search, ace-search, terminal-execute  |
 | `oms_researcher` | Deep research with web search and code analysis            | + websearch-search, websearch-fetch                             |
 | `oms_designer`   | UI/UX design and interface specification                   | filesystem-read, codebase-search, ace-search                    |
 | `oms_tester`     | Test writing and execution                                 | + filesystem-create/edit, terminal-execute, ide-get_diagnostics |
 | `oms_ds`         | Data analysis and statistical modeling                     | filesystem-read, codebase-search, ace-search                    |
-| `oms_reviewer`   | Code review and quality assessment                         | + ide-get_diagnostics                                           |
-| `oms_security`   | Security audit and vulnerability assessment                | + websearch-search                                              |
-| `oms_devops`     | DevOps, deployment, and CI/CD pipeline management          | + filesystem-create/edit, terminal-execute                      |
+| `oms_reviewer`   | Code review and quality assessment                         | + ide-get_diagnostics, terminal-execute                         |
+| `oms_security`   | Security audit and vulnerability assessment                | + websearch-search, websearch-fetch                              |
+| `oms_devops`     | DevOps, deployment, and CI/CD pipeline management          | + filesystem-create/edit, terminal-execute, codebase-search, ide-get_diagnostics |
 | `oms_frontend`   | Frontend development and component implementation          | + filesystem-create/edit, codebase-search                       |
 | `oms_backend`    | Backend development and API implementation                 | + terminal-execute                                              |
-| `oms_database`   | Database operations, schema design, and query optimization | + filesystem-create/edit, terminal-execute                      |
-| `oms_api`        | API design and contract specification                      | filesystem-read, codebase-search, ace-search                    |
+| `oms_database`   | Database operations, schema design, and query optimization | + filesystem-create/edit, terminal-execute, ide-get_diagnostics |
+| `oms_api`        | API design and contract specification                      | filesystem-read, codebase-search, ace-search, terminal-execute |
 | `oms_docs`       | Documentation writing and maintenance                      | + filesystem-create/edit                                        |
 | `oms_optimizer`  | Performance optimization and profiling                     | + terminal-execute                                              |
 | `oms_migrator`   | Code migration and framework upgrades                      | + filesystem-create/edit, terminal-execute                      |

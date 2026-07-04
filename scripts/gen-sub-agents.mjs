@@ -8,7 +8,7 @@
 //   Bash                                        -> terminal-execute
 //   lsp_diagnostics / lsp_diagnostics_directory -> ide-get_diagnostics
 //   python_repl                                 -> terminal-execute
-//   WebSearch / WebFetch                        -> websearch-search / websearch-fetch / umans-web-search
+//   WebSearch / WebFetch                        -> websearch-search / websearch-fetch
 //
 // Collaboration mapping:
 //   Task(subagent_type="oh-my-claudecode:X")    -> #oms_X
@@ -76,7 +76,7 @@ const architect = {
   id: 'oms_architect',
   name: 'OMS Architect',
   description: 'System architecture design and review',
-  tools: ['filesystem-read', 'codebase-search', 'ace-search', 'ide-get_diagnostics'],
+  tools: ['filesystem-read', 'codebase-search', 'ace-search', 'ide-get_diagnostics', 'terminal-execute'],
   role: wrap(
     ROLE_BLOCK(
       'Architect',
@@ -135,7 +135,7 @@ const researcher = {
   id: 'oms_researcher',
   name: 'OMS Researcher',
   description: 'Deep research with web search and code analysis',
-  tools: ['filesystem-read', 'codebase-search', 'ace-search', 'websearch-search', 'websearch-fetch', 'umans-web-search', 'todo-manage'],
+  tools: ['filesystem-read', 'codebase-search', 'ace-search', 'websearch-search', 'websearch-fetch', 'todo-manage'],
   role: wrap(
     ROLE_BLOCK(
       'Researcher',
@@ -169,7 +169,7 @@ const researcher = {
       'filesystem-read to inspect local documentation and source files.',
       'codebase-search + ace-search for codebase-internal patterns and symbols.',
       'websearch-search to find official docs, papers, manuals, and reference databases.',
-      'websearch-fetch / umans-web-search to extract details from specific documentation pages.',
+      'websearch-fetch to extract details from specific documentation pages.',
       'todo-manage to track multi-step research plans.',
     ], true),
     FAILURE_BLOCK([
@@ -374,7 +374,7 @@ const reviewer = {
   id: 'oms_reviewer',
   name: 'OMS Reviewer',
   description: 'Code review and quality assessment',
-  tools: ['filesystem-read', 'codebase-search', 'ace-search', 'ide-get_diagnostics'],
+  tools: ['filesystem-read', 'codebase-search', 'ace-search', 'ide-get_diagnostics', 'terminal-execute'],
   role: wrap(
     ROLE_BLOCK(
       'Code Reviewer',
@@ -438,7 +438,7 @@ const security = {
   id: 'oms_security',
   name: 'OMS Security Auditor',
   description: 'Security audit and vulnerability assessment',
-  tools: ['filesystem-read', 'codebase-search', 'ace-search', 'terminal-execute', 'websearch-search', 'ide-get_diagnostics'],
+  tools: ['filesystem-read', 'codebase-search', 'ace-search', 'terminal-execute', 'websearch-search', 'websearch-fetch', 'ide-get_diagnostics'],
   role: wrap(
     ROLE_BLOCK(
       'Security Reviewer',
@@ -499,7 +499,7 @@ const devops = {
   id: 'oms_devops',
   name: 'OMS DevOps Engineer',
   description: 'DevOps, CI/CD, and deployment automation',
-  tools: ['filesystem-read', 'filesystem-create', 'filesystem-edit', 'filesystem-replaceedit', 'terminal-execute', 'ace-search'],
+  tools: ['filesystem-read', 'filesystem-create', 'filesystem-edit', 'filesystem-replaceedit', 'terminal-execute', 'ace-search', 'codebase-search', 'ide-get_diagnostics'],
   role: wrap(
     ROLE_BLOCK(
       'DevOps Engineer',
@@ -689,7 +689,7 @@ const database = {
   id: 'oms_database',
   name: 'OMS Database Engineer',
   description: 'Database schema, migrations, and query optimization',
-  tools: ['filesystem-read', 'filesystem-create', 'filesystem-edit', 'filesystem-replaceedit', 'terminal-execute', 'ace-search', 'codebase-search'],
+  tools: ['filesystem-read', 'filesystem-create', 'filesystem-edit', 'filesystem-replaceedit', 'terminal-execute', 'ace-search', 'codebase-search', 'ide-get_diagnostics'],
   role: wrap(
     ROLE_BLOCK(
       'Database Engineer',
@@ -751,7 +751,7 @@ const api = {
   id: 'oms_api',
   name: 'OMS API Designer',
   description: 'API design and contract specification',
-  tools: ['filesystem-read', 'codebase-search', 'ace-search', 'filesystem-create', 'filesystem-edit'],
+  tools: ['filesystem-read', 'codebase-search', 'ace-search', 'filesystem-create', 'filesystem-edit', 'terminal-execute'],
   role: wrap(
     ROLE_BLOCK(
       'API Designer',
