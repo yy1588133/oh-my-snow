@@ -27,21 +27,6 @@ import { getStateDir, loadState, saveState, detectVerifyCommand, readStdin, appe
 // read logic. on-stop.mjs still calls loadPrd() for buildPrdSection (surfacing
 // PRD progress in the continuation prompt) — same function, now shared.
 
-function syncSleep(ms) {
-	// Synchronous sleep via Atomics.wait when SharedArrayBuffer is available;
-	// falls back to a Date.now() spin (same primitive store.ts uses). This is a
-	// sync hook, so blocking the event loop for ~20ms is acceptable. Note:
-	// Atomics.wait does NOT yield the JS thread (it's a sync block) — it parks
-	// the OS thread at the kernel level without burning CPU, which is cheaper
-	// than a Date.now() spin but still blocks the event loop for the duration.
-	try {
-		Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
-	} catch {
-		const start = Date.now();
-		while (Date.now() - start < ms) { /* spin fallback */ }
-	}
-}
-
 function buildPrdSection(prd) {
 	if (!prd || !prd.refined) {
 		return prd
@@ -55,6 +40,12 @@ function buildPrdSection(prd) {
 	}
 	const passed = prd.stories.filter((s) => s && s.passes).length;
 	const total = prd.stories.length;
+	// Empty stories array — distinct from "all pass" (which implies stories exist
+	// and are all verified). Without this, total=0 makes next=undefined and the
+	// else-branch below would falsely say "All stories pass".
+	if (total === 0) {
+		return '\nPRD: no stories defined. Call oms-prd action "refine" with task-specific stories.\n';
+	}
 	// Sort a COPY so we never mutate the loaded prd object (matters if loadPrd
 	// is ever cached; harmless today but avoids a latent footgun).
 	const sorted = [...prd.stories].sort((a, b) => a.priority - b.priority);
@@ -284,6 +275,21 @@ function runVerification(state) {
 			`  - Call oms-start with an explicit verifyCommand (e.g. "npm test") and retry\n\n`;
 	}
 
+	// Security: reject commands with dangerous shell metacharacters before
+	// execution. The MCP layer (store.ts validateVerifyCommand) already
+	// validates on input, but a stored command could have been tampered with
+	// on disk or set by a legacy state.json. This is the last line of defense
+	// before execSync(verifyCmd, { shell: true }).
+	if (/[;`$]/.test(verifyCmd) || verifyCmd.includes('\n') || /\b&(?!\s*&)/.test(verifyCmd)) {
+		if (markerExists) {
+			try { unlinkSync(markerPath); } catch {}
+		}
+		return `[OMS:VERIFY] Verify command contains dangerous shell metacharacters and was rejected for security.\n` +
+			`Command: "${verifyCmd.slice(0, 100)}"\n\n` +
+			`Blocked characters: ; backtick $ newline & (background)\n` +
+			`Run oms-stop and restart with a safe verify command (allowed: &&, ||, |).\n\n`;
+	}
+
 	let buildErrorPrefix = '';
 
 	// Execute the verify command (always — caller decides whether to invoke us)
@@ -291,7 +297,7 @@ function runVerification(state) {
 		execSync(verifyCmd, {
 			cwd: process.cwd(),
 			encoding: 'utf-8',
-			timeout: 110000,
+			timeout: 300000,
 			shell: true,
 			stdio: ['pipe', 'pipe', 'pipe'],
 		});
@@ -433,10 +439,10 @@ async function main() {
 	const bypassDetected = checkTextBypass(state, fullDiff);
 
 	// Build continuation prompt
-	// Pre-load PRD once — loadState() already read it internally for staleness
-	// check, but didn't expose it. We read it here (single disk read) and pass
-	// to buildContinuationPrompt so the executing case doesn't re-read it.
-	const prd = loadPrd();
+	// Reuse the PRD cached by loadState() (read during staleness check) to
+	// avoid a redundant loadPrd() disk read. Falls back to loadPrd() only if
+	// the cache is missing (e.g. state was loaded by a different caller).
+	const prd = state._cachedPrd !== undefined ? state._cachedPrd : loadPrd();
 	let prompt = buildContinuationPrompt(state, fullDiff, prd);
 
 	if (!prompt) {

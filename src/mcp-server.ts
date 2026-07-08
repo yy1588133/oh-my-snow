@@ -81,9 +81,10 @@ server.registerTool(
 		description:
 			'Initialize an OMS orchestration session. Creates state.json and enters the "planning" stage. Call this first before any other oms-* tools.',
 		inputSchema: {
-			goal: z.string().describe('The high-level goal the AI should accomplish'),
+			goal: z.string().max(2000).describe('The high-level goal the AI should accomplish'),
 			verifyCommand: z
 				.string()
+				.max(500)
 				.optional()
 				.describe(
 					'Command to run for build/test verification (e.g. "npm test", "dotnet build"). If omitted, auto-detect from project files.',
@@ -122,9 +123,9 @@ server.registerTool(
 			// Clean up residue from a previous 'done' session before creating a new one
 			if (existing && existingStage === 'done') {
 				deleteState();
-			}
-			const verifyCmd = params.verifyCommand ?? '';
-			const state = createState(params.goal, verifyCmd);
+		}
+		const verifyCmd = params.verifyCommand ?? '';
+		const state = createState(params.goal, verifyCmd);
 
 			// If a verify command was provided, also write it to the verify.cmd file
 			// so hooks (which don't have MCP access) can read it
@@ -222,9 +223,9 @@ server.registerTool(
 								: '') +
 							`Created: ${state.createdAt}\n` +
 							`Updated: ${state.updatedAt}\n\n` +
-							`Tasks (${state.tasks.filter(t => t.completed).length}/${
-								state.tasks.length
-							} completed):\n` +
+						`Tasks (${tasks.filter(t => t.completed).length}/${
+							tasks.length
+						} completed):\n` +
 							(taskLines || '  (no tasks yet)') +
 							'\n\n' +
 							`Recent logs:\n` +
@@ -331,6 +332,7 @@ server.registerTool(
 		inputSchema: {
 			description: z
 				.string()
+				.max(2000)
 				.describe('Clear, actionable description of the task'),
 		},
 	},
@@ -379,6 +381,7 @@ server.registerTool(
 		inputSchema: {
 			taskId: z
 				.string()
+				.max(100)
 				.describe('The task ID to mark as completed (e.g. "task_1")'),
 		},
 	},
@@ -430,6 +433,7 @@ server.registerTool(
 		inputSchema: {
 			teamName: z
 				.string()
+				.max(200)
 				.describe('The snow-cli team name to associate with this OMS session'),
 		},
 	},
@@ -489,10 +493,12 @@ server.registerTool(
 				.describe('The snapshot action to perform'),
 			key: z
 				.string()
+				.max(200)
 				.optional()
 				.describe('Snapshot key (required for save/restore)'),
 			data: z
 				.string()
+				.max(100000)
 				.optional()
 				.describe('JSON string of data to save (required for save action)'),
 		},
@@ -553,13 +559,21 @@ server.registerTool(
 						isError: true,
 					};
 				}
-				let parsed: unknown;
-				try {
-					parsed = JSON.parse(params.data);
-				} catch {
-					parsed = params.data; // Store as string if not valid JSON
-				}
-				saveSnapshot(state, params.key, parsed);
+			let parsed: unknown;
+			try {
+				parsed = JSON.parse(params.data);
+			} catch {
+				return {
+					content: [
+						{
+							type: 'text' as const,
+							text: 'Error: "data" must be valid JSON. Serialize the object before passing it (e.g. JSON.stringify(myData)).',
+						},
+					],
+					isError: true,
+				};
+			}
+			saveSnapshot(state, params.key, parsed);
 				return {
 					content: [
 						{
@@ -620,14 +634,16 @@ server.registerTool(
 		description:
 			'Extract reusable patterns from the current session and orchestrate a skill evolution cycle (reflect → explore → evaluate) to generate an optimized SKILL.md.',
 		inputSchema: {
-			summary: z.string().describe('Summary of what was accomplished'),
+			summary: z.string().max(10000).describe('Summary of what was accomplished'),
 			patterns: z
 				.string()
+				.max(50000)
 				.describe(
 					'JSON array of pattern objects, each with "name", "description", and "applicability"',
 				),
 			skillName: z
 				.string()
+				.max(100)
 				.optional()
 				.describe(
 					'Name for the generated skill (defaults to "session_<sessionId>")',
@@ -742,10 +758,14 @@ server.registerTool(
 
 			const maxIter = Math.min(params.maxIterations ?? 2, 5); // Hard cap at 5
 
-			// Generate the initial SKILL.md draft content
+			// Generate the initial SKILL.md draft content.
+			// YAML-escape the description: wrap in double quotes and escape any
+			// internal double quotes and backslashes. Without this, a summary
+			// containing ":" or "---" would break the frontmatter parser.
+			const yamlDescription = JSON.stringify(params.summary.split('\n')[0].slice(0, 200));
 			const draftContent = `---
 name: ${skillName}
-description: ${params.summary.split('\n')[0].slice(0, 200)}
+description: ${yamlDescription}
 ---
 
 # ${skillName}
@@ -765,8 +785,8 @@ ${patternsArr
 
 ## Session Context
 - Goal: ${state.goal}
-- Tasks completed: ${state.tasks.filter(t => t.completed).length}/${
-				state.tasks.length
+- Tasks completed: ${(Array.isArray(state.tasks) ? state.tasks : []).filter(t => t.completed).length}/${
+				(Array.isArray(state.tasks) ? state.tasks : []).length
 			}
 - Turns: ${state.turnCount}
 
@@ -879,6 +899,7 @@ server.registerTool(
 				.describe('The PRD action to perform'),
 			task: z
 				.string()
+				.max(2000)
 				.optional()
 				.describe(
 					'The task description (required for "init" and "refine")',
@@ -886,22 +907,25 @@ server.registerTool(
 			stories: z
 				.array(
 					z.object({
-						title: z.string(),
-						acceptanceCriteria: z.array(z.string()).min(1),
+						title: z.string().max(500),
+						acceptanceCriteria: z.array(z.string().max(2000)).min(1),
 						priority: z.number().int().positive(),
 					}),
 				)
+				.max(100)
 				.optional()
 				.describe(
 					'Refined stories (required for "refine"). Each has title, acceptance criteria texts, and priority.',
 				),
 			title: z
 				.string()
+				.max(500)
 				.optional()
 				.describe('Story title (required for "add-story")'),
 			acceptanceCriteria: z
-				.array(z.string())
+				.array(z.string().max(2000))
 				.min(1)
+				.max(50)
 				.optional()
 				.describe(
 					'Acceptance criteria texts (required for "add-story"). At least one criterion is required so Ralph can verify each before passing.',
@@ -914,6 +938,7 @@ server.registerTool(
 				.describe('Story priority, lower = higher (for "add-story"); must be a positive integer'),
 			storyId: z
 				.string()
+				.max(50)
 				.optional()
 				.describe('Story id, e.g. "US-001" (for get-story / mark-passes / unmark-passes / verify-criterion)'),
 			criterionIndex: z
@@ -932,6 +957,7 @@ server.registerTool(
 				),
 			message: z
 				.string()
+				.max(5000)
 				.optional()
 				.describe('Progress entry text — required for "log-progress"'),
 			scope: z
@@ -942,6 +968,7 @@ server.registerTool(
 				),
 			requestId: z
 				.string()
+				.max(100)
 				.optional()
 				.describe(
 					'UUID verification token — required for "submit-approval" (must match the token returned by request-verification).',
@@ -952,16 +979,19 @@ server.registerTool(
 				.describe('Reviewer verdict — required for "submit-approval"'),
 			feedback: z
 				.string()
+				.max(10000)
 				.optional()
 				.describe('Reviewer feedback text — required for "submit-approval"'),
 			reviewerAgentId: z
 				.string()
+				.max(200)
 				.optional()
 				.describe(
 					'Which reviewer agent submitted the approval (caller attribution audit, AC1.12) — required for "submit-approval"',
 				),
 			criticTier: z
 				.string()
+				.max(100)
 				.optional()
 				.describe('Critic tier used for the review (architect/critic/codex) — optional for "submit-approval"'),
 		},
@@ -1310,11 +1340,10 @@ server.registerTool(
 					}
 					const passes = params.action === 'mark-passes';
 					// setPrdStoryPasses returns a structured result distinguishing the
-					// three refusal reasons (missing-prd / missing-story / guard) plus
-					// the verified/total counts for the guard case. This lets us give the
-					// agent an accurate, actionable error in ONE store call — no MCP-layer
-					// loadPrd pre-check (read #1) and no post-refusal freshPrd re-read
-					// (read #3). The old code did up to 3 sync loadPrd+JSON.parse per refusal.
+					// four refusal reasons (missing-prd / missing-story / guard / no-approval)
+					// plus the verified/total counts for the guard case. This lets us give
+					// the agent an accurate, actionable error in ONE store call — no MCP-layer
+					// loadPrd pre-check and no post-refusal freshPrd re-read.
 					const result = setPrdStoryPasses(params.storyId, passes);
 					if (!result.ok) {
 						if (result.reason === 'missing-prd') {
@@ -1323,18 +1352,37 @@ server.registerTool(
 						if (result.reason === 'missing-story') {
 							return noStoryError(params.storyId);
 						}
-						// reason === 'guard': mark-passes(true) refused because not all
-						// criteria are verified (or the story has zero criteria — a legacy
-						// PRD). Direct the agent to verify each criterion first; the counts
-						// come straight from the store, no re-read needed.
+						if (result.reason === 'guard') {
+							// mark-passes(true) refused because not all criteria are verified
+							// (or the story has zero criteria — a legacy PRD). Direct the
+							// agent to verify each criterion first; the counts come straight
+							// from the store, no re-read needed.
+							return {
+								content: [
+									{
+										type: 'text' as const,
+										text:
+											`Error: Cannot mark story "${params.storyId}" as passing — not all acceptance criteria are verified yet.\n` +
+											`Call oms-prd with action: "verify-criterion" for each criterion with fresh evidence first.\n` +
+											`Verified: ${result.verifiedCount}/${result.totalCount}`,
+									},
+								],
+								isError: true,
+							};
+						}
+						// result.reason === 'no-approval': all criteria verified but
+						// no matching approved verification. Direct the agent to
+						// request verification and get reviewer approval first.
 						return {
 							content: [
 								{
 									type: 'text' as const,
 									text:
-										`Error: Cannot mark story "${params.storyId}" as passing — not all acceptance criteria are verified yet.\n` +
-										`Call oms-prd with action: "verify-criterion" for each criterion with fresh evidence first.\n` +
-										`Verified: ${result.verifiedCount}/${result.totalCount}`,
+										`Error: Cannot mark story "${params.storyId}" as passing — no matching approved verification.\n` +
+										`All acceptance criteria are verified, but a reviewer must approve first.\n\n` +
+										`1. Call oms-prd with action: "request-verification", storyId: "${params.storyId}", scope: "story"\n` +
+										`2. Have the reviewer approve via: oms-prd action: "submit-approval" requestId: <token> verdict: "approved" feedback: "..." reviewerAgentId: "<id>"\n` +
+										`3. Then re-call oms-prd with action: "mark-passes" and storyId: "${params.storyId}"`,
 								},
 							],
 							isError: true,
@@ -1780,9 +1828,11 @@ server.registerTool(
 				.describe('The state action to perform'),
 			mode: z
 				.string()
+				.regex(/^[a-zA-Z0-9_-]+$/, 'Mode name must be alphanumeric with underscores/hyphens only')
+				.max(128, 'Mode name must not exceed 128 characters')
 				.optional()
 				.describe(
-					'State domain name (e.g. "interview", "deep-dive", "trace"). Required for write/read/delete; ignored by list. Must match ^[a-zA-Z0-9_-]+$.',
+					'State domain name (e.g. "interview", "deep-dive", "trace"). Required for write/read/delete; ignored by list. Must match ^[a-zA-Z0-9_-]+$, max 128 chars.',
 				),
 			data: z
 				.string()

