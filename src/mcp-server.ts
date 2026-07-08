@@ -58,6 +58,7 @@ import {
 } from './state/store.js';
 import {writeFileSync, mkdirSync} from 'fs';
 import {join} from 'path';
+import {homedir} from 'os';
 
 // ── Server setup ──
 
@@ -107,8 +108,10 @@ server.registerTool(
 								existing.goal
 							}").\n\nUse oms-get-state to check current progress, or oms-stop to end the previous session first.\n\nCurrent state:\n- Stage: ${
 								existing.stage
-							}\n- Goal: ${existing.goal}\n- Tasks: ${existing.tasks.length} (${
-								existing.tasks.filter(t => t.completed).length
+							}\n- Goal: ${existing.goal}\n- Tasks: ${
+								(Array.isArray(existing.tasks) ? existing.tasks : []).length
+							} (${
+								(Array.isArray(existing.tasks) ? existing.tasks : []).filter(t => t.completed).length
 							} completed)\n- Turn: ${existing.turnCount}`,
 						},
 					],
@@ -187,11 +190,13 @@ server.registerTool(
 				};
 			}
 
-			const taskLines = state.tasks
+			const tasks = Array.isArray(state.tasks) ? state.tasks : [];
+			const taskLines = tasks
 				.map(t => `  [${t.completed ? '✓' : '○'}] ${t.id}: ${t.description}`)
 				.join('\n');
 
-			const recentLogs = state.logs
+			const logs = Array.isArray(state.logs) ? state.logs : [];
+			const recentLogs = logs
 				.slice(-5)
 				.map(l => `  [${l.stage}] ${l.timestamp}: ${l.message}`)
 				.join('\n');
@@ -772,7 +777,7 @@ ${patternsArr
 
 			// Save the draft to the skill directory
 			const skillDir = join(
-				process.env.HOME || process.env.USERPROFILE || '',
+				homedir(),
 				'.snow',
 				'skills',
 				'oms',
@@ -1668,7 +1673,7 @@ server.registerTool(
 						const guidance: Record<string, string> = {
 							'mismatch': 'The requestId does not match the pending verification. Re-request and use the new token.',
 							'used': 'This verification was already resolved (approved/rejected) and cannot be reused. Re-request a new verification.',
-							'expired': 'This verification is past its TTL (30 min). Re-request a fresh verification.',
+							'expired': 'This verification is past its TTL (2 hours). Re-request a fresh verification.',
 							'max-attempts': 'Too many failed submit-approval attempts (reject count exceeded). Re-request a new verification to reset.',
 							'missing': 'No pending verification exists. Call request-verification first.',
 						};
@@ -1882,22 +1887,16 @@ server.registerTool(
 
 			if (params.action === 'delete') {
 				const deleted = deleteOmsState(params.mode);
-				if (!deleted) {
-					return {
-						content: [
-							{
-								type: 'text' as const,
-								text: `No state found for mode "${params.mode}" (nothing to delete).`,
-							},
-						],
-						isError: true,
-					};
-				}
+				// delete is idempotent — "not found" is not an error, the end state
+				// (mode absent) is the same either way. Returning isError would make
+				// skill retry logic treat a clean-up as a failure.
 				return {
 					content: [
 						{
 							type: 'text' as const,
-							text: `✅ State deleted: mode "${params.mode}".`,
+							text: deleted
+								? `✅ State deleted: mode "${params.mode}".`
+								: `• No state found for mode "${params.mode}" (already absent — nothing to delete).`,
 						},
 					],
 				};
@@ -1944,10 +1943,11 @@ server.registerTool(
 				};
 			}
 
+			const tasks = Array.isArray(state.tasks) ? state.tasks : [];
 			const summary = `Session ${state.sessionId} ended. Final stage: ${
 				state.stage
-			}. Tasks: ${state.tasks.filter(t => t.completed).length}/${
-				state.tasks.length
+			}. Tasks: ${tasks.filter(t => t.completed).length}/${
+				tasks.length
 			} completed. Turns: ${state.turnCount}.`;
 			deleteState();
 			// Also clean up Ralph PRD files (prd.json + progress.txt) if present.

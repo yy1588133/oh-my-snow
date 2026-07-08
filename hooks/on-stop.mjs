@@ -76,6 +76,7 @@ function getGitDiffStat() {
 			cwd: process.cwd(),
 			encoding: 'utf-8',
 			timeout: 5000,
+			shell: true,
 			stdio: ['pipe', 'pipe', 'pipe'],
 		}).trim();
 	} catch {
@@ -85,7 +86,7 @@ function getGitDiffStat() {
 
 // ── Build continuation prompt ──
 
-function buildContinuationPrompt(state, gitDiff) {
+function buildContinuationPrompt(state, gitDiff, prd) {
 	const stage = state.stage;
 	const turn = state.turnCount;
 	// Iteration progress for the header (US-002): show turn/softMax (hard max hardMax)
@@ -95,7 +96,10 @@ function buildContinuationPrompt(state, gitDiff) {
 	const hardMax = state.hardMaxIterations ?? 200;
 	const turnProgress = `${turn}/${max} (hard max ${hardMax})`;
 	const goal = state.goal;
-	const tasks = state.tasks;
+	// Guard against a malformed state.json (torn write / manual edit) — without
+	// this, tasks.filter below throws TypeError and crashes the onStop hook.
+	// Mirrors the Array.isArray(prd.stories) guard in buildPrdSection.
+	const tasks = Array.isArray(state.tasks) ? state.tasks : [];
 	const completedTasks = tasks.filter((t) => t.completed);
 	const inTeamMode = !!state.teamName;
 
@@ -170,7 +174,10 @@ Drive standby teammates yourself via message_teammate.`;
 				.join('\n');
 			// Ralph mode: if a PRD exists, surface its progress so the AI knows
 			// which story to work on next. No-op when Ralph isn't active.
-			const prd = loadPrd();
+			// prd is passed from main() — loadState() already reads prd.json
+			// internally for staleness check, so we reuse the cached result
+			// instead of calling loadPrd() again here (saves one disk read +
+			// JSON.parse per turn).
 			const prdSection = buildPrdSection(prd);
 			const ralphHint = prd
 				? `\nRalph mode active. Use oms-prd to manage stories; verify EACH acceptance criterion with fresh evidence before mark-passes.\n`
@@ -285,6 +292,7 @@ function runVerification(state) {
 			cwd: process.cwd(),
 			encoding: 'utf-8',
 			timeout: 110000,
+			shell: true,
 			stdio: ['pipe', 'pipe', 'pipe'],
 		});
 		// Build succeeded — no error prefix
@@ -425,7 +433,11 @@ async function main() {
 	const bypassDetected = checkTextBypass(state, fullDiff);
 
 	// Build continuation prompt
-	let prompt = buildContinuationPrompt(state, fullDiff);
+	// Pre-load PRD once — loadState() already read it internally for staleness
+	// check, but didn't expose it. We read it here (single disk read) and pass
+	// to buildContinuationPrompt so the executing case doesn't re-read it.
+	const prd = loadPrd();
+	let prompt = buildContinuationPrompt(state, fullDiff, prd);
 
 	if (!prompt) {
 		// No continuation needed — but if there was a build error, inject it

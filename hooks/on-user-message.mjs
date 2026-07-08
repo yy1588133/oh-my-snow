@@ -21,7 +21,9 @@ import { loadState, readStdin, appendErrorLog } from './lib/oms-state.mjs';
 function getStagePrompt(state) {
 	const stage = state.stage;
 	const goal = state.goal;
-	const tasks = state.tasks;
+	// Guard against a malformed state.json (torn write / manual edit) — without
+	// this, tasks.filter below throws TypeError and crashes the hook.
+	const tasks = Array.isArray(state.tasks) ? state.tasks : [];
 	const completedTasks = tasks.filter((t) => t.completed);
 
 	switch (stage) {

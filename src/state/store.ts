@@ -105,8 +105,11 @@ const VALID_TRANSITIONS: Record<Stage, Stage[]> = {
 // ── Path resolution ──
 
 function getStateDir(): string {
-	// OMS_STATE_DIR env var is set by the MCP server config in settings.json
-	// Hooks don't have this env var, so they use process.cwd() relative path
+	// OMS_STATE_DIR env var support is intentionally NOT used by the installer
+	// (installer.ts setupMcpConfig omits it). Both the MCP server and hooks
+	// fall back to process.cwd()/.snow/oms-state, which dynamically resolves
+	// to the current project directory at runtime. The env var check is kept
+	// for forward compatibility (e.g. custom deployments that override the path).
 	const envDir = process.env.OMS_STATE_DIR;
 	if (envDir) {
 		return envDir;

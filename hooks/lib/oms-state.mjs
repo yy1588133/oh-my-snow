@@ -267,7 +267,12 @@ export function saveState(state) {
 	}
 
 	try {
-		const tmpPath = filePath + '.tmp';
+		// PID-suffixed tmp path so two concurrent writers (locked holder + force
+		// fallback) don't collide on the same `state.json.tmp` — matches store.ts
+		// tmpRenameWrite which uses `.${process.pid}.tmp`. cleanupTmpFiles in
+		// store.ts only matches `.<digits>.tmp` files, so a bare `.tmp` would
+		// never be cleaned up after a crash.
+		const tmpPath = `${filePath}.${process.pid}.tmp`;
 		writeFileSync(tmpPath, content, 'utf-8');
 		try {
 			renameSync(tmpPath, filePath);

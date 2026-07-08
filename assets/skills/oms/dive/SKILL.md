@@ -237,7 +237,7 @@ Phase 4 遵循 oms interview skill 的 Phase 2-4（Interview Loop / Challenge Ag
 **Override 1 — initial_idea 富化**：把 oms interview 的原始 `{{ARGUMENTS}}` 初始化替换成：
 
 ```
-原始问题: {ARGUMENTS}
+原始问题: {{ARGUMENTS}}
 
 <trace-context>
 Trace 发现: {most_likely_explanation 从 trace 综合}
