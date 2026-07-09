@@ -21,6 +21,12 @@ import { existsSync, unlinkSync } from 'fs';
 import { join } from 'path';
 import { execSync } from 'child_process';
 import { getStateDir, loadState, saveState, detectVerifyCommand, readStdin, appendErrorLog, forceSetStage, loadPrd, inspectStateFile } from './lib/oms-state.mjs';
+import {
+	loadLedgerSummary,
+	buildStatusPanel,
+	buildSoftExtendBanner,
+	buildHardStopReport,
+} from './lib/status-panel.mjs';
 
 // loadPrd extracted to lib/oms-state.mjs (Phase 2 US-003) so loadState can read
 // prd.updatedAt for the three-timestamp staleness check without duplicating the
@@ -429,47 +435,56 @@ async function main() {
 	// 3. Single saveState call (covers both normal and force-transition paths)
 	saveState(state);
 
-	// 4. If force-transitioned: inject transition message and exit
+	// Shared panel context for every continue / hard-stop path below.
+	const prd = state._cachedPrd !== undefined ? state._cachedPrd : loadPrd();
+	const ledger = loadLedgerSummary(getStateDir());
+	const panelCtx = {
+		state,
+		ledger,
+		prd,
+		verifyNote: buildErrorPrefix
+			? truncForPanel(buildErrorPrefix, 180)
+			: null,
+	};
+	const fullPanel = () =>
+		buildStatusPanel(panelCtx, {mode: 'full'}) + '\n\n';
+
+	// 4. Force-transition continue: must still carry full status panel (R1/F1).
 	if (forceTransitioned) {
-		buildErrorPrefix =
+		const msg =
+			fullPanel() +
 			`[OMS:STAGE TRANSITION] done → executing — you can now edit files to fix the build errors.\n\n` +
-			buildErrorPrefix;
-		process.stderr.write(buildErrorPrefix);
+			(buildErrorPrefix || '');
+		process.stderr.write(msg);
 		process.exit(2);
 	}
 
 	// ── Iteration caps (anti-forge/staleness/soft-max patch, plan US-002) ──
-	// Old fixed MAX_TURNS=50 / HARD_STOP=55 replaced with dynamic caps stored
-	// on state. Soft cap auto-extends +10 on hit ("boulder keeps rolling");
-	// only hard cap is a true stop. Defaults backfilled by loadState (50/200)
-	// so legacy state.json without these fields still works.
 	const maxIter = state.maxIterations ?? 50;
 	const hardMax = state.hardMaxIterations ?? 200;
 
-	// Hard stop: end the conversation entirely (fail-open). The only true stop
-	// besides explicit oms-stop / oms-set-stage:done. turnCount > hardMax means
-	// even with soft-cap extensions the loop ran past the hard ceiling.
+	// Hard stop: end the conversation. Do NOT set stage=done or clear state.
 	if (state.turnCount > hardMax) {
-		const hardStopMsg =
-			`[OMS:HARD STOP] Reached hard max iterations (${hardMax}). Session force-stopped.\n` +
-			`Goal: ${state.goal}\n` +
-			`Stage: ${state.stage}\n` +
-			`Run oms-stop to clean up, or /oms:goal again with a fresh session.`;
-		process.stderr.write(hardStopMsg);
+		process.stderr.write(buildHardStopReport(panelCtx));
 		process.exit(0);
 	}
 
-	// Soft cap reached: extend +10 and keep the boulder rolling. NOT a stop.
-	// omc ralph's "boulder never stops" philosophy — only hardMax truly ends.
-	// We saveState the new cap so the extension persists across turns, then
-	// fall through to normal continuation injection.
+	// Soft cap: extend +10 and keep rolling. NOT a stop; quota renew only.
 	let extendedNote = '';
 	if (state.turnCount > maxIter) {
 		const oldMax = maxIter;
-		state.maxIterations = maxIter + 10;
+		const step = 10;
+		state.maxIterations = maxIter + step;
 		saveState(state);
+		// Refresh panelCtx turns after soft extend (state already mutated).
 		extendedNote =
-			`[OMS:EXTENDED] Reached soft cap ${oldMax} turns, extending to ${state.maxIterations}. Boulder keeps rolling.\n\n`;
+			buildSoftExtendBanner({
+				oldSoft: oldMax,
+				newSoft: state.maxIterations,
+				turnCount: state.turnCount,
+				hardMax,
+				delta: step,
+			}) + '\n';
 	}
 
 	// Get git diff
@@ -479,41 +494,40 @@ async function main() {
 	const bypassDetected = checkTextBypass(state, fullDiff);
 
 	// Build continuation prompt
-	// Reuse the PRD cached by loadState() (read during staleness check) to
-	// avoid a redundant loadPrd() disk read. Falls back to loadPrd() only if
-	// the cache is missing (e.g. state was loaded by a different caller).
-	const prd = state._cachedPrd !== undefined ? state._cachedPrd : loadPrd();
 	let prompt = buildContinuationPrompt(state, fullDiff, prd);
 
 	if (!prompt) {
-		// No continuation needed — but if there was a build error, inject it
+		// Continue with build error only — still attach full status panel.
 		if (buildErrorPrefix) {
-			process.stderr.write(buildErrorPrefix);
+			process.stderr.write(fullPanel() + (extendedNote || '') + buildErrorPrefix);
 			process.exit(2);
 		}
 		process.exit(0);
 	}
 
+	// Order (KTD7): [STATUS full] → optional soft banner → instructions
+	const statusBlock = fullPanel();
+
 	if (bypassDetected && prompt) {
-		// Prepend warning about text bypass
 		prompt =
 			`⚠️ WARNING: No file changes detected via git diff, but you may have claimed to have changes.\n` +
 			`Please use filesystem-* tools (filesystem-edit, filesystem-create, filesystem-replaceedit) to actually modify files.\n\n` +
 			prompt;
 	}
 
-	// Prepend build error (if any) to the continuation prompt
 	if (buildErrorPrefix) {
 		prompt = buildErrorPrefix + prompt;
 	}
 
-	// Exit code 2: inject user message + continue conversation
-	// Prepend extended-cap note (if soft cap was hit this turn) to the prompt.
-	if (extendedNote) {
-		prompt = extendedNote + prompt;
-	}
+	prompt = statusBlock + (extendedNote || '') + prompt;
 	process.stderr.write(prompt);
 	process.exit(2);
+}
+
+function truncForPanel(s, n) {
+	const t = String(s || '').replace(/\s+/g, ' ').trim();
+	if (t.length <= n) return t;
+	return t.slice(0, n - 1) + '…';
 }
 
 main().catch((error) => {

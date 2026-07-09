@@ -32,3 +32,6 @@ Thumbs.db
 
 # npm pack artifacts
 *.tgz
+
+# Local workflow / agent runtime state
+.workflow/

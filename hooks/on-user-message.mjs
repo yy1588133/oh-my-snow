@@ -14,7 +14,8 @@
  * { message: string, imageCount: number, ... }
  */
 
-import { loadState, readStdin, appendErrorLog } from './lib/oms-state.mjs';
+import { loadState, readStdin, appendErrorLog, getStateDir } from './lib/oms-state.mjs';
+import { loadLedgerSummary, buildStatusPanel } from './lib/status-panel.mjs';
 
 // ── Stage-specific prompts ──
 
@@ -105,9 +106,16 @@ async function main() {
 		process.exit(0);
 	}
 
-	// Prepend the user's original message to the stage guidance
+	const ledger = loadLedgerSummary(getStateDir());
+	const status = buildStatusPanel(
+		{state, ledger, prd: null, verifyNote: null},
+		{mode: 'compact'},
+	);
+
+	// Prepend the user's original message to compact status + stage guidance
 	const userMsg = context.message || '';
-	process.stderr.write(userMsg ? `${userMsg}\n\n---\n${prompt}` : prompt);
+	const body = `${status}\n\n${prompt}`;
+	process.stderr.write(userMsg ? `${userMsg}\n\n---\n${body}` : body);
 	process.exit(1);
 }
 main().catch((error) => {

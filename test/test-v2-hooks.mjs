@@ -192,7 +192,12 @@ writeState({ ...baseState, stage: 'executing', turnCount: 50, maxIterations: 49,
 const r15c = runHook('hooks/on-stop.mjs', JSON.stringify({ messages: [] }));
 assert('onStop: soft-cap extension triggers exit 2', r15c.exitCode === 2, `got ${r15c.exitCode}`);
 assert('onStop: soft-cap delivers [OMS:EXTENDED] message', r15c.stderr.includes('[OMS:EXTENDED]'), r15c.stderr.slice(0, 200));
-assert('onStop: soft-cap mentions extension to 59 (49+10)', r15c.stderr.includes('extending to 59'), r15c.stderr.slice(0, 300));
+assert(
+	'onStop: soft-cap mentions soft 49 → 59 (quota renew)',
+	r15c.stderr.includes('49') && r15c.stderr.includes('59') &&
+		(r15c.stderr.includes('[OMS:EXTENDED]') && r15c.stderr.includes('quota')),
+	r15c.stderr.slice(0, 300),
+);
 
 // Test 15b: onStop auto-detects verifyCommand from verify.cmd file (avoids npm test recursion)
 writeState({ ...baseState, stage: 'executing', verifyCommand: '', turnCount: 1 });
@@ -272,6 +277,7 @@ const r23 = runHook('hooks/on-stop.mjs', JSON.stringify({ messages: [] }));
 assert('onStop: done + failing build = exit 2', r23.exitCode === 2, `got ${r23.exitCode}`);
 assert('onStop: done + failing build = STAGE TRANSITION message', r23.stderr.includes('[OMS:STAGE TRANSITION]'), r23.stderr.slice(0, 300));
 assert('onStop: done + failing build = BUILD FAILED message', r23.stderr.includes('[OMS:BUILD FAILED]'), r23.stderr.slice(0, 300));
+assert('onStop: done + failing build = STATUS panel', r23.stderr.includes('[OMS:STATUS]'), r23.stderr.slice(0, 400));
 // Verify state was force-transitioned to 'executing' (was 'fixing' before stage removal)
 const state23 = JSON.parse(readFileSync(join(stateDir, 'state.json'), 'utf-8'));
 assert('onStop: done + failing build = stage is executing in state.json', state23.stage === 'executing', `got ${state23.stage}`);

@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>OMS 后续优化思路 · 对照 workflow-cookbook</title>
+<title>OMS 后续优化思路 · 对照 workflow-cookbook（续）</title>
 <style>
   :root {
     --bg: #f7f4ef;
@@ -16,6 +16,8 @@
     --warn: #9a3412;
     --warn-soft: #ffedd5;
     --rank: #1e3a5f;
+    --done: #166534;
+    --done-soft: #dcfce7;
   }
   * { box-sizing: border-box; }
   body {
@@ -50,7 +52,7 @@
   }
   h3 { margin: 0 0 0.4rem; font-size: 1.08rem; }
   p { margin: 0.55rem 0; }
-  ul { padding-left: 1.2rem; }
+  ul, ol { padding-left: 1.2rem; }
   li { margin: 0.25rem 0; }
   code, .path {
     font-family: ui-monospace, "Cascadia Code", Consolas, monospace;
@@ -95,6 +97,10 @@
     margin: 1rem 0;
     box-shadow: 0 6px 18px rgba(28, 25, 23, 0.04);
   }
+  .card.landed {
+    border-color: #86efac;
+    background: linear-gradient(180deg, #f0fdf4 0%, var(--card) 48%);
+  }
   .rank {
     display: inline-block;
     background: var(--rank);
@@ -106,6 +112,7 @@
     margin-right: 0.4rem;
     vertical-align: middle;
   }
+  .rank.done { background: var(--done); }
   .tags { margin: 0.55rem 0 0.2rem; }
   .tag {
     display: inline-block;
@@ -117,6 +124,7 @@
     color: #115e59;
   }
   .tag.warn { background: var(--warn-soft); color: var(--warn); }
+  .tag.done { background: var(--done-soft); color: var(--done); }
   .basis {
     background: #f4faf8;
     border-left: 3px solid var(--accent);
@@ -138,6 +146,13 @@
     padding: 0.9rem 1rem;
     margin: 1rem 0;
   }
+  .delta {
+    background: #eff6ff;
+    border: 1px solid #bfdbfe;
+    border-radius: 12px;
+    padding: 0.9rem 1rem;
+    margin: 1rem 0;
+  }
   footer {
     margin-top: 2.5rem;
     color: var(--muted);
@@ -150,6 +165,19 @@
     display: block;
     margin: 0.8rem auto;
   }
+  table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 0.92rem;
+    margin: 0.8rem 0;
+  }
+  th, td {
+    border: 1px solid var(--line);
+    padding: 0.45rem 0.55rem;
+    text-align: left;
+    vertical-align: top;
+  }
+  th { background: #f0ebe3; }
 </style>
 </head>
 <body>
@@ -157,9 +185,9 @@
 <header class="hero">
   <h1>OMS 后续优化思路</h1>
   <p class="meta">
-    <span><strong>date:</strong> 2026-07-09</span>
+    <span><strong>date:</strong> 2026-07-09（续写）</span>
     <span><strong>topic:</strong> oms-optimization-from-workflow-cookbook</span>
-    <span><strong>mode:</strong> repo-grounded</span>
+    <span><strong>mode:</strong> repo-grounded · continue</span>
   </p>
   <p class="meta"><strong>focus:</strong> 对照
     <a href="https://github.com/AGI-is-going-to-arrive/workflow-cookbook">workflow-cookbook（织经）</a>
@@ -168,208 +196,310 @@
 </header>
 
 <section>
+  <h2>Continuation Delta</h2>
+  <div class="delta">
+    <p><strong>承接自：</strong>同文件首版 ideation（当日上午）。用户选择「接着上次继续」。</p>
+    <p><strong>仓库已变：</strong>分支 <code>feat/completion-gates</code> 已落地首版 #1+#2+#3 的 L1 形态（plan
+      <code>docs/plans/2026-07-09-002-feat-completion-gates-plan.md</code> · 提交
+      <code>723e499</code> / <code>a009352</code> / <code>f183484</code>）。maturity Top-10 假绿修复亦已合入。</p>
+    <p><strong>续写原则：</strong>不再把「口头 done」主战场当未知题；重点转到
+      <em>门禁之上的配方层、诚实收口、可观测与可复用工序</em>，并从 cookbook 第 24.7 质量三拍、附录 F、第 25 库化、第 26 反模式补盲区。</p>
+  </div>
+</section>
+
+<section>
   <h2>Grounding Context</h2>
   <h3>Codebase Context</h3>
   <ul>
     <li><strong>产品形态：</strong> Snow CLI 上的自主编排插件（v0.2.0）：MCP 状态机 + 4 lifecycle hooks + 18 sub-agents + 10 skills + 18 commands。</li>
-    <li><strong>控制平面：</strong><code>planning → executing → verifying → done</code>；文件写受 stage 门禁；onStop 驱动续推、text-bypass、auto-verify；Ralph/PRD 有独立 approval 门。</li>
-    <li><strong>韧性资产：</strong> turn soft/hard cap、state 过期、atomic write、oms-state 技能状态、snapshot、doctor（文档已宣传）。</li>
-    <li><strong>近期焦点：</strong><code>docs/plans/2026-07-09-001-maturity-top10-pr-plan.md</code> 已锁定 P0 可信度（verify 静默失败、timeout、桥接、planning shell、doctor/CI 等）。本 ideation <strong>不重复</strong> 该栈，面向「P0 之后」的编排质量与可复用配方层。</li>
-    <li><strong>设计语言：</strong><code>OMS-DESIGN-CONSTRAINTS.md</code> 强调 PRD、审批门、反伪造 token、阶段状态机、oms-state 持久化、file:line 证据。</li>
+    <li><strong>控制平面：</strong><code>planning → executing → verifying → done</code>；文件写受 stage 门禁；onStop 驱动续推、text-bypass、auto-verify。</li>
+    <li><strong>已落地的完成门（L1）：</strong><code>gatesRequired</code> + ledger 多闸（task-complete / task-reconcile / code-quality / completion）；成绩单 scorecard；reject → <code>executing</code> + <code>lastGateFailure</code>；禁止主身份自签 completion；写盘护栏拦 oms-state 旁路。</li>
+    <li><strong>仍明确 Deferred：</strong>完成门 L2（真独立 critic 会话 / nonce / teammate-only submit / worktree）。</li>
+    <li><strong>韧性资产：</strong> turn soft/hard cap、state 过期、atomic write、oms-state skill store、snapshot、doctor。</li>
+    <li><strong>Team：</strong><code>/oms:team</code> 已有 worktree 隔离与 lead 编排文案，但合并侧可观测/空结果过滤/嫁接综合仍偏提示词。</li>
+    <li><strong>设计语言：</strong><code>OMS-DESIGN-CONSTRAINTS.md</code> — PRD、审批门、反伪造 token、阶段状态机、oms-state、file:line 证据。</li>
   </ul>
   <h3>External Context（workflow-cookbook）</h3>
   <ul>
-    <li>核心洞察（第 23 章）：社区系统（含 OMC）用「提示词 + Hook + 磁盘状态」<em>模拟</em>确定性编排；可迁移的是<strong>模式</strong>，不是宿主实现。</li>
-    <li>精华模式（附录 F / 第 24 章）：验证门循环、持久循环+诚实上限、状态句柄、角色隔离、对抗验证、GCF、loop-until-dry、pipeline 默认 vs barrier、预算硬上限、可观测截断。</li>
-    <li>反模式（第 26 章）：无界 while、只靠模型 done、schema 过严、静默丢结果、控制流屏障误用。</li>
-    <li>质量套路三拍（第 24.7）：① 独立多视角 → ② 对抗验证 → ③ 代码做确定性收口。</li>
+    <li><strong>第 23 章：</strong>社区系统用「提示词 + Hook + 磁盘」<em>模拟</em>确定性编排；可迁移的是模式，不是宿主实现。</li>
+    <li><strong>第 24 章精华提取：</strong>解构→抽象→适配→验证；验证门循环、持久循环+hitCeiling、状态句柄、角色隔离、Category→Model。</li>
+    <li><strong>第 24.7 质量三拍：</strong>① 独立多视角 → ② 对抗验证 → ③ 代码做确定性收口（计票/去重/过滤交给代码，不交给模型）。</li>
+    <li><strong>附录 F 经典形状：</strong>Pipeline / Barrier / Adversarial / Judge Panel / Loop-until-X / Nested；场景→模式速查。</li>
+    <li><strong>第 25 章库化：</strong>具名 + 参数化 + 版本 + fixture 回归 + 自解释 meta（whenToUse）。</li>
+    <li><strong>第 26 章反模式：</strong>无界 while、预算不主动刹车、schema 过严、静默丢结果、控制流屏障误用、靠脚本主体写盘传数据。</li>
   </ul>
   <div class="note">
-    <strong>与 Claude Code Workflow 的边界：</strong> OMS 跑在 Snow CLI，没有原生 <code>agent()/pipeline()/schema</code> 运行时。可借鉴的是控制结构与产品契约；不可直接搬 JS workflow 脚本或依赖 <code>CLAUDE_CODE_WORKFLOWS</code>。
+    <strong>与 Claude Code Workflow 的边界（不变）：</strong> OMS 跑在 Snow CLI，没有原生
+    <code>agent()/pipeline()/schema</code> 运行时。可借鉴控制结构与产品契约；用 MCP + hooks + skill/command 表达等价结构。
   </div>
 </section>
 
 <section>
   <h2>Topic Axes</h2>
   <div class="axes">
-    <div class="axis"><strong>A1 · 完成与预算</strong>何时允许停、如何诚实收口、成本可见</div>
-    <div class="axis"><strong>A2 · 质量门拓扑</strong>生成/批评/验证分离与结构化判决</div>
-    <div class="axis"><strong>A3 · 多 agent 拓扑</strong>team/pipeline/屏障/worktree 调度语义</div>
-    <div class="axis"><strong>A4 · 状态与可观测</strong>面包屑、journal、非静默丢弃</div>
-    <div class="axis"><strong>A5 · 配方产品化</strong>可命名、可参数化、可回归的 workflow 库</div>
+    <div class="axis"><strong>A1 · 完成与预算</strong>何时允许停、hitCeiling、成本可见（门禁之上）</div>
+    <div class="axis"><strong>A2 · 质量门拓扑</strong>双关/对抗已 L1；L2 隔离与配方内循环</div>
+    <div class="axis"><strong>A3 · 多 agent 拓扑</strong>team / pipeline / barrier / worktree / 空结果</div>
+    <div class="axis"><strong>A4 · 状态与可观测</strong>面包屑 schema、journal、非静默截断</div>
+    <div class="axis"><strong>A5 · 配方产品化</strong>可命名、可参数化、可回归的 recipe 库</div>
   </div>
 </section>
 
 <section>
-  <h2>Ranked Ideas</h2>
+  <h2>Already Landed（首版 #1–#3 · 勿重复立项）</h2>
+  <article class="card landed">
+    <h3><span class="rank done">L1</span> 结构化闸门 + 两段验证 + completion 挑刺</h3>
+    <div class="tags">
+      <span class="tag done">status: shipped on feat/completion-gates</span>
+      <span class="tag">origin: 首版 #1 #2 #3</span>
+    </div>
+    <p>机读 scorecard、task-complete 进 verifying、verifying 内 task-reconcile→code-quality、done 前 completion 签核、reject 原子打回。
+      对应 cookbook「schema 门控 / 验证门循环 / refute 精神」在 OMS 宿主上的 L1 适配。</p>
+    <p><strong>残留机会（不单开成「再做一遍门」）：</strong> L2 真隔离 critic；门禁注入更结构化；schema 过严导致空转（反模式 D1）的监控。</p>
+  </article>
+</section>
+
+<section>
+  <h2>Ranked Ideas · Wave 2（门禁之后）</h2>
   <div class="jump">
-    <a href="#i1">#1 结构化闸门契约</a>
-    <a href="#i2">#2 两段式验证阶段</a>
-    <a href="#i3">#3 done 前对抗证伪</a>
-    <a href="#i4">#4 有界 GCF 配方</a>
-    <a href="#i5">#5 面包屑状态句柄</a>
-    <a href="#i6">#6 预算与诚实上限</a>
-    <a href="#i7">#7 配方库产品化</a>
+    <a href="#w1">#1 结构化面包屑</a>
+    <a href="#w2">#2 hitCeiling 诚实收口</a>
+    <a href="#w3">#3 有界 GCF 金牌配方</a>
+    <a href="#w4">#4 完成门 L2 隔离</a>
+    <a href="#w5">#5 Loop-until-dry 发现配方</a>
+    <a href="#w6">#6 评委/多透镜 plan</a>
+    <a href="#w7">#7 配方库 + 回归</a>
   </div>
 
-  <article class="card" id="i1">
-    <h3><span class="rank">1</span> 结构化闸门契约（Schema-gated stage contracts）</h3>
+  <article class="card" id="w1">
+    <h3><span class="rank">1</span> 结构化面包屑状态句柄（每轮固定块 + journal）</h3>
     <div class="tags">
-      <span class="tag">axis: A2/A1</span>
-      <span class="tag">confidence: 88%</span>
-      <span class="tag">complexity: Medium</span>
+      <span class="tag">axis: A4</span>
+      <span class="tag">confidence: 90%</span>
+      <span class="tag">complexity: Low–Medium</span>
+      <span class="tag">was: 首版 #5</span>
     </div>
-    <p>在 stage 跃迁与关键 skill 收口点引入<strong>机器可读判决对象</strong>（JSON），而不是仅靠自然语言 continuation prompt。例如 <code>verifying→done</code> 需要 <code>{ pass, blockers[], evidence[] }</code>；story <code>mark-passes</code> 已有 approval，可扩展到 auto/qa 的通用 gate record。</p>
+    <p>把 onStop / onUserMessage 注入从散文 guidance 升级为<strong>固定 schema 块</strong>：stage、turn soft/hard、tasks 剩余、last verify exit、PRD 进度、
+      <code>gatesRequired</code>、ledger 缺哪闸、<code>lastGateFailure</code> 摘要、open risks。可选
+      <code>.snow/oms-state/journal.jsonl</code> 追加「轮次 / 门事件 / 丢弃计数」供人机审计。</p>
     <div class="basis">
       <strong>basis</strong><br/>
-      <em>direct:</em> OMS 已有 PRD <code>request-verification</code>/<code>submit-approval</code> 与 stage 机，但对 general auto 路径，done 仍主要靠 agent 自报 + build/test。<br/>
-      <em>external:</em> cookbook 第 17/24 章：enum 三态 / <code>pass:boolean</code> 把门控从散文变成状态机迁移；schema 管形状、独立 agent 管真伪。
+      <em>direct:</em> 门禁已写 ledger / lastGateFailure，但注入仍偏自然语言；压缩后易丢「下一闸该交什么」。<br/>
+      <em>external:</em> cookbook 第 24 章 ccg→状态句柄：显式、结构化传递；第 26 章 D3 截断必留痕。
     </div>
-    <p><strong>rationale:</strong> 这是 OMS 与「确定性骨架」差距最大、杠杆最高的一层：不换宿主也能把「过没过」变成可编程数据，支撑后续所有质量配方。</p>
-    <p><strong>downsides:</strong> 需要定义最小 schema 与兼容策略；过严会触发反复重试式空转（反模式 D1）。</p>
-    <svg class="diagram" viewBox="0 0 640 160" aria-label="gate contract diagram">
-      <rect x="20" y="50" width="120" height="56" rx="10" fill="#ccfbf1" stroke="#0f766e"/>
-      <text x="80" y="83" text-anchor="middle" font-size="13">Agent work</text>
-      <path d="M145 78 H190" stroke="#1c1917" stroke-width="2" marker-end="url(#a)"/>
-      <rect x="195" y="40" width="150" height="76" rx="10" fill="#1e3a5f"/>
-      <text x="270" y="75" text-anchor="middle" fill="#fff" font-size="13">Gate record</text>
-      <text x="270" y="95" text-anchor="middle" fill="#99f6e4" font-size="11">{pass, blockers}</text>
-      <path d="M350 78 H395" stroke="#1c1917" stroke-width="2"/>
-      <rect x="400" y="28" width="100" height="48" rx="8" fill="#bbf7d0" stroke="#166534"/>
-      <text x="450" y="57" text-anchor="middle" font-size="12">pass → next</text>
-      <rect x="400" y="90" width="100" height="48" rx="8" fill="#fed7aa" stroke="#9a3412"/>
-      <text x="450" y="119" text-anchor="middle" font-size="12">fail → loop</text>
-      <defs><marker id="a" markerWidth="8" markerHeight="8" refX="6" refY="3" orient="auto"><path d="M0,0 L6,3 L0,6 Z" fill="#1c1917"/></marker></defs>
+    <p><strong>rationale:</strong> 门禁把「能不能停」变成数据后，下一步最高杠杆是让主 agent <em>每轮都看见同一张控制面板</em>——贴合现有 hook 架构，成本最低。</p>
+    <p><strong>downsides:</strong> 注入过长挤占上下文；需硬上限 + 差分更新（只打变更字段）。</p>
+    <svg class="diagram" viewBox="0 0 640 140" aria-label="breadcrumb diagram">
+      <rect x="20" y="40" width="110" height="55" rx="10" fill="#ccfbf1" stroke="#0f766e"/>
+      <text x="75" y="72" text-anchor="middle" font-size="12">hooks</text>
+      <path d="M135 67 H180" stroke="#1c1917" stroke-width="2"/>
+      <rect x="185" y="30" width="200" height="75" rx="10" fill="#1e3a5f"/>
+      <text x="285" y="62" text-anchor="middle" fill="#fff" font-size="12">STATE_SCHEMA 块</text>
+      <text x="285" y="82" text-anchor="middle" fill="#99f6e4" font-size="11">stage · gates · failure</text>
+      <path d="M390 67 H435" stroke="#1c1917" stroke-width="2"/>
+      <rect x="440" y="40" width="160" height="55" rx="10" fill="#fde68a" stroke="#a16207"/>
+      <text x="520" y="72" text-anchor="middle" font-size="12">下一动作清晰</text>
     </svg>
   </article>
 
-  <article class="card" id="i2">
-    <h3><span class="rank">2</span> 两段式验证阶段（Spec 合规 → 代码质量）</h3>
-    <div class="tags">
-      <span class="tag">axis: A2</span>
-      <span class="tag">confidence: 84%</span>
-      <span class="tag">complexity: Medium</span>
-    </div>
-    <p>把 <code>verifying</code> 从「跑测试 + 自由复盘」升级为固定两闸：① 对照 tasks/PRD/验收（有没有做对范围）② 独立 code quality/security 视角。每闸独立 sub-agent + gate record；第一闸不过不烧第二闸 token。</p>
-    <div class="basis">
-      <strong>basis</strong><br/>
-      <em>direct:</em> onStop 在 verifying 注入「review changes + build/test」；没有强制维度分离。<br/>
-      <em>external:</em> superpowers 两段式评审（cookbook 23/24）；GCF 与对抗验证的「生成与评估分离」。
-    </div>
-    <p><strong>rationale:</strong> 测试绿 ≠ 做对需求；两闸正交，直接抬升「自驾可靠」叙事可信度。</p>
-    <p><strong>downsides:</strong> wall-clock 与 token 增加；小改动需要 skip/轻量模式。</p>
-  </article>
-
-  <article class="card" id="i3">
-    <h3><span class="rank">3</span> done 前独立对抗证伪（refute-by-default）</h3>
-    <div class="tags">
-      <span class="tag">axis: A2</span>
-      <span class="tag">confidence: 82%</span>
-      <span class="tag">complexity: Medium</span>
-    </div>
-    <p>对「可以收工」的主张默认证伪：派独立 <code>#oms_critic</code>/<code>#oms_reviewer</code>，只给 claim + 原始证据（diff/stat、测试输出、task 列表），不给主 agent 的辩护长文；判决 <code>confirmed|refuted|uncertain</code>，默认不放行 uncertain。</p>
-    <div class="basis">
-      <strong>basis</strong><br/>
-      <em>direct:</em> text-bypass 只抓「声称改了但 git 无 diff」；Ralph 有 reviewer 签核，auto 路径较弱。<br/>
-      <em>external:</em> 第 17 章对抗验证；OmO VERIFICATION_REMINDER「子 agent 说完成了就去验证」。
-    </div>
-    <p><strong>rationale:</strong> 终结「自我评估完成」——这是 OMC/OMS 类系统最容易假绿的点。</p>
-    <p><strong>downsides:</strong> 至少 +1 agent；误杀真完成时需要 rework 路径与置信度。</p>
-  </article>
-
-  <article class="card" id="i4">
-    <h3><span class="rank">4</span> 有界 GCF 配方（Generate–Critique–Fix）</h3>
-    <div class="tags">
-      <span class="tag">axis: A2/A5</span>
-      <span class="tag">confidence: 80%</span>
-      <span class="tag">complexity: Medium</span>
-    </div>
-    <p>新增可调用配方（skill 或 command）：独立 Critique 产出 <code>issues[]</code>，Fix 逐条对账并带 changelog；收敛 / 轮次上限（经验 3）/ budget 三重刹车。可挂在 high-risk 文件、cleanup、或 auto 对关键模块的可选增强。</p>
-    <div class="basis">
-      <strong>basis</strong><br/>
-      <em>direct:</em> 有 <code>cleanup</code> skill 与 qa 循环，但缺「结构化挑刺列表 + 有界迭代」产品形状。<br/>
-      <em>external:</em> 第 12 章 GCF 实跑揪出 10 缺陷；第 18/26 章禁止无界 while。
-    </div>
-    <p><strong>rationale:</strong> 把「写完自己瞅一眼」升级为可复现的质量工序，且能作为第一个「配方库」样板。</p>
-    <p><strong>downsides:</strong> 串行三阶段贵；需防 Critique 无限挑刺（必须轮次帽）。</p>
-  </article>
-
-  <article class="card" id="i5">
-    <h3><span class="rank">5</span> 强化面包屑状态句柄（每轮结构化注入）</h3>
-    <div class="tags">
-      <span class="tag">axis: A4</span>
-      <span class="tag">confidence: 78%</span>
-      <span class="tag">complexity: Low–Medium</span>
-    </div>
-    <p>把 onStop/onUserMessage 注入从散文 guidance 升级为固定块：stage、turn/soft/hard、tasks 剩余、last verify exit、PRD 进度、open risks、last gate record 摘要。压缩后仍可读；可选写入 <code>.snow/oms-state/journal.jsonl</code> 供人机审计。</p>
-    <div class="basis">
-      <strong>basis</strong><br/>
-      <em>direct:</em> onStop 已注入 stage/PRD/turn 进度，但非统一 schema，journal 人读性弱。<br/>
-      <em>external:</em> ccg <code>&lt;ccg-state&gt;</code> 面包屑；第 24 章「显式、结构化传递」原则。
-    </div>
-    <p><strong>rationale:</strong> OMS 本就靠 hook 续命——这是在既有架构上成本最低的抗失忆升级。</p>
-    <p><strong>downsides:</strong> 注入过长挤占上下文；需严格上限与差分更新。</p>
-  </article>
-
-  <article class="card" id="i6">
-    <h3><span class="rank">6</span> 预算维度与诚实收口（hitCeiling）</h3>
+  <article class="card" id="w2">
+    <h3><span class="rank">2</span> 预算维度与诚实收口（hitCeiling）</h3>
     <div class="tags">
       <span class="tag">axis: A1</span>
-      <span class="tag">confidence: 76%</span>
+      <span class="tag">confidence: 86%</span>
       <span class="tag">complexity: Medium</span>
+      <span class="tag">was: 首版 #6</span>
     </div>
-    <p>在 turn cap 之外增加「成本/轮次策略包」：预估每轮代价、接近 soft max 时降级（少并行、跳可选 GCF）、触顶时返回 <code>hitCeiling:true</code> + 未完成清单，而不是假装 done。用户可设 token/分钟预算（若宿主可观测；否则用 turn×启发式）。</p>
+    <p>在 turn soft/hard cap 上增加「策略包」：接近 soft 时降级（少并行、跳可选 GCF）、触顶返回
+      <code>hitCeiling:true</code> + 未完成清单 + 已过哪些门，而不是假装 <code>done</code> 或死磕到 hard 崩溃。
+      用户可设 turn/分钟启发式预算（无原生 token 计数时诚实声明启发式）。</p>
     <div class="basis">
       <strong>basis</strong><br/>
-      <em>direct:</em> <code>maxIterations</code>/<code>hardMaxIterations</code> 已存在，缺「优雅降级」与诚实失败语义。<br/>
-      <em>external:</em> 第 18/21/26 章 budget 硬上限、ROUND_COST 主动刹车、hitCeiling 标注。
+      <em>direct:</em> <code>maxIterations</code>/<code>hardMaxIterations</code> 已有，缺优雅降级与「撞顶 ≠ 成功」语义。<br/>
+      <em>external:</em> 第 18/21/26 章：有界 while + budget 主动刹车 + hitCeiling 标注；C1/C2 反模式。
     </div>
-    <p><strong>rationale:</strong> 自主循环的可信来自「停得住且说得清」，不是「跑得最久」。</p>
-    <p><strong>downsides:</strong> 无原生 token 计数时只能启发式；产品文案要避免虚假精度。</p>
+    <p><strong>rationale:</strong> 完成门堵住假绿后，第二大信任问题是「烧光预算还说差不多了」。诚实收口直接服务「自驾可信」叙事。</p>
+    <p><strong>downsides:</strong> 无精确 token 时避免虚假精度；文案要区分「用户停」与「系统触顶」。</p>
   </article>
 
-  <article class="card" id="i7">
-    <h3><span class="rank">7</span> 具名配方库（Recipe library）产品化</h3>
+  <article class="card" id="w3">
+    <h3><span class="rank">3</span> 有界 GCF 金牌配方（Generate–Critique–Fix）</h3>
     <div class="tags">
-      <span class="tag">axis: A5/A3</span>
-      <span class="tag">confidence: 74%</span>
-      <span class="tag">complexity: High</span>
+      <span class="tag">axis: A2/A5</span>
+      <span class="tag">confidence: 84%</span>
+      <span class="tag">complexity: Medium</span>
+      <span class="tag">was: 首版 #4</span>
     </div>
-    <p>把散落在 command prompt 里的流程提升为版本化配方：<code>meta.name/description/phases</code>、参数 schema、退出条件、推荐 agent 拓扑、回归用例（fixture 仓库 dogfood）。首批配方：sharded-review、gcf、adversarial-done、prd-acceptance-loop、team-pipeline。</p>
+    <p>第一个可命名工序：独立 Critique 产出 <code>issues[]</code>（severity + file:line），Fix 逐条对账 changelog；
+      收敛 / 轮次帽（默认 3）/ 预算 三重刹车。可挂 cleanup、高风险路径、或 auto 可选增强；产出 issues 列表可再喂完成门 evidence。</p>
     <div class="basis">
       <strong>basis</strong><br/>
-      <em>direct:</em> 18 个 command 多为长 prompt 字符串；skill 深度在增强，但缺少「库 + 版本 + 分享」层。<br/>
-      <em>external:</em> 第 25 章 workflow 库；附录 F 场景→模式地图。
+      <em>direct:</em> cleanup + qa 循环存在，但缺「结构化挑刺列表 + 有界迭代」产品形状。<br/>
+      <em>external:</em> 第 12 章 GCF 实跑揪 10 缺陷；附录 F「有界 Loop + 对抗」；第 24 章 gatedFix 范本。
     </div>
-    <p><strong>rationale:</strong> 把 OMS 从「一个通用 auto」升级为「编排平台 + 可复用工序」，形成与 OMC/cookbook 同级的生态语言。</p>
-    <p><strong>downsides:</strong> 产品与文档负担大；应先做 2–3 个金牌配方再谈库。</p>
+    <p><strong>rationale:</strong> 门禁解决「能不能收工」；GCF 解决「中间质量工序可复现」——是配方库的样板工程。</p>
+    <p><strong>downsides:</strong> 串行贵；Critique 无限挑刺必须轮次帽 + severity 过滤。</p>
   </article>
+
+  <article class="card" id="w4">
+    <h3><span class="rank">4</span> 完成门 L2：真独立 critic 隔离</h3>
+    <div class="tags">
+      <span class="tag">axis: A2</span>
+      <span class="tag">confidence: 80%</span>
+      <span class="tag">complexity: High</span>
+      <span class="tag warn">deferred from gates plan</span>
+    </div>
+    <p>把 L1「协议层禁止自签」升级为运行时隔离：nonce 仅 critic 可见、teammate-only submit、可选 worktree/独立会话。
+      材料协议：只给 claim + 原始证据（diff/stat、测试输出、task 列表），不给主 agent 辩护长文。</p>
+    <div class="basis">
+      <strong>basis</strong><br/>
+      <em>direct:</em> plan KTD3 / DoD 已诚实写明 L1 residual「伪 oms_critic 字符串」。<br/>
+      <em>external:</em> 第 17 章 refute-by-default；第 19 章 worktree；OmO VERIFICATION_REMINDER 精神。
+    </div>
+    <p><strong>rationale:</strong> 对安全/发布类会话，L1 只是止疼；L2 才是「对抗验证」的宿主级等价。</p>
+    <p><strong>downsides:</strong> 依赖 Snow team/会话能力；实现与测试面大——应在 L1 dogfood 稳定后再开。</p>
+  </article>
+
+  <article class="card" id="w5">
+    <h3><span class="rank">5</span> Loop-until-dry 发现配方（猎手池 + dry-streak）</h3>
+    <div class="tags">
+      <span class="tag">axis: A5/A1</span>
+      <span class="tag">confidence: 78%</span>
+      <span class="tag">complexity: Medium–High</span>
+    </div>
+    <p>面向「不知道有多少问题」的场景（分支扫雷、迁移残留、文档死链）：固定或自繁殖 finder 池 →
+      每条发现轻量对抗/去重 → <strong>连续 K 轮无新增才停</strong> + 硬轮次 + 预算。提供 lite（固定池）/ full（自繁殖）两档。</p>
+    <div class="basis">
+      <strong>basis</strong><br/>
+      <em>direct:</em> trace/dive/cleanup 偏单次深挖；缺「未知规模发现」的停止判据产品化。<br/>
+      <em>external:</em> 附录 F Loop-until-X；第 15/18/24.7 bughunt 骨架；dry-streak ≠ 一轮空就收。
+    </div>
+    <p><strong>rationale:</strong> 补齐「验收循环（已有门）」之外的另一半：发现循环。与 GCF 正交——一个找未知，一个修已知。</p>
+    <p><strong>downsides:</strong> 成本上界需档位；误报需轻量 verify，避免每条五票（成本不匹配）。</p>
+  </article>
+
+  <article class="card" id="w6">
+    <h3><span class="rank">6</span> 多透镜草案 + 评委面板（强化 /oms:plan）</h3>
+    <div class="tags">
+      <span class="tag">axis: A3/A5</span>
+      <span class="tag">confidence: 74%</span>
+      <span class="tag">complexity: Medium</span>
+    </div>
+    <p>在 plan 路径可选：4 透镜（MVP / risk / dependency / user）独立草案 → M 评委打分 →
+      <strong>代码计票选冠军</strong> → agent 只做「嫁接亚军亮点」的综合。确定性操作（计票、去重）不交给模型。</p>
+    <div class="basis">
+      <strong>basis</strong><br/>
+      <em>direct:</em> <code>/oms:plan</code> / plan skill 已有战略规划，但默认单路径生成。<br/>
+      <em>external:</em> 第 14 章 judge panel；第 24.7 plan-hunter；质量三拍 ①+②+③。
+    </div>
+    <p><strong>rationale:</strong> 解空间宽的规划任务最吃「独立多视角」；可显著拉开与「一上来就写一个 plan」的差距。</p>
+    <p><strong>downsides:</strong> N×M agent 成本；仅大决策默认开启，小任务保持单路径。</p>
+  </article>
+
+  <article class="card" id="w7">
+    <h3><span class="rank">7</span> 具名配方库 + fixture 回归（产品化）</h3>
+    <div class="tags">
+      <span class="tag">axis: A5</span>
+      <span class="tag">confidence: 72%</span>
+      <span class="tag">complexity: High</span>
+      <span class="tag">was: 首版 #7</span>
+    </div>
+    <p>把散落 command prompt 提升为版本化配方：name / description / whenToUse / phases / args 契约 /
+      退出条件 / 推荐拓扑 / <code>_fixtures</code> + 不变量测试。首批金牌：gcf、adversarial-done（已部分内建）、loop-until-dry、multidim-review、plan-panel。</p>
+    <div class="basis">
+      <strong>basis</strong><br/>
+      <em>direct:</em> 18 commands 多为长 prompt；skill 深但缺「库 + 回归 + 分享」层。<br/>
+      <em>external:</em> 第 25 章全章；附录 F 场景地图；成品清单 6 要件。
+    </div>
+    <p><strong>rationale:</strong> 平台叙事从「一个 auto」升级为「编排平台 + 可复用工序」；但应在 2–3 个金牌配方跑通后再铺库脚手架。</p>
+    <p><strong>downsides:</strong> 文档与维护负担；过早抽象会空转——先配方后库。</p>
+  </article>
+</section>
+
+<section>
+  <h2>Also Strong · Not Top-7（短名单）</h2>
+  <table>
+    <thead>
+      <tr><th>想法</th><th>为何没进前 7</th><th>何时回看</th></tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td><strong>Team 合并可观测</strong>：merge 前 <code>.filter(Boolean)</code> 语义、丢弃计数 log、失败 teammate 不静默吞</td>
+        <td>偏实现细节，可塞进 #1 journal + team 文案迭代</td>
+        <td>team 模式 dogfood 出黑箱时</td>
+      </tr>
+      <tr>
+        <td><strong>Planner 角色隔离</strong>：planning 产物 schema 锁死「只能是计划」</td>
+        <td>stage 写禁已覆盖大半；schema 层是增量</td>
+        <td>出现 planning 夹带大 diff 叙事时</td>
+      </tr>
+      <tr>
+        <td><strong>Category→model 路由表</strong></td>
+        <td>依赖 Snow 多模型调度能力是否稳定暴露</td>
+        <td>宿主支持按 agent 选模型后</td>
+      </tr>
+      <tr>
+        <td><strong>嵌套配方</strong>：auto 内嵌 gcf/dry 子工序（仅一层）</td>
+        <td>需先有 #3/#5 可嵌对象</td>
+        <td>金牌配方存在后</td>
+      </tr>
+    </tbody>
+  </table>
 </section>
 
 <section>
   <h2>Also Considered · Rejected</h2>
-  <div class="reject"><strong>把 Claude Code Dynamic Workflow 运行时移植进 OMS</strong> — 宿主与协议完全不同；违反「抽模式不抄实现」。应在 Snow 能力边界内用 MCP+hooks 表达等价控制结构。</div>
-  <div class="reject"><strong>无界 boulder / 只靠模型 done 退出</strong> — cookbook 反模式 C1；与现有 hardMax 方向冲突，会烧光用户预算。</div>
-  <div class="reject"><strong>复述 maturity Top-10（timeout/||/doctor/CI）为本 ideation 主线</strong> — 已有 implementation-ready 计划；重复会掩盖「P0 之后」的真实机会。</div>
-  <div class="reject"><strong>默认对所有改动上 5 票陪审团</strong> — 第 17 章明确成本应匹配判错代价；应仅用于 done/安全/发布类高代价门。</div>
-  <div class="reject"><strong>在 hook 脚本主体靠写盘传 agent 间数据</strong> — cookbook D2：跨 agent 应用结构化返回值/状态工具，而不是隐式文件副作用。</div>
-  <div class="reject"><strong>Team 模式全面改成无协调自由并行</strong> — 无屏障会在合并阶段爆炸；只在「任务独立」时采用 pipeline 语义，跨任务去重/合并仍要 barrier。</div>
+  <div class="reject"><strong>把 Claude Code Dynamic Workflow 运行时移植进 OMS</strong> — 宿主与协议不同；抽模式不抄实现。</div>
+  <div class="reject"><strong>无界 boulder / 只靠模型 done 退出</strong> — 反模式 C1；与 hardMax + 完成门方向冲突。</div>
+  <div class="reject"><strong>重做 maturity Top-10 / 再立项一遍 L1 完成门</strong> — 已在代码与 plan 中；重复会掩盖 Wave 2 机会。</div>
+  <div class="reject"><strong>默认对所有改动上 5 票陪审团</strong> — 成本应匹配判错代价；仅高代价门/安全场景。</div>
+  <div class="reject"><strong>在 hook 主体靠写盘传 agent 间业务数据</strong> — D2：跨 agent 走 MCP 状态/结构化返回，不靠隐式文件副作用（状态文件本身作为控制平面除外）。</div>
+  <div class="reject"><strong>Team 改成无协调自由并行</strong> — 无屏障合并爆炸；独立任务才 pipeline，跨任务合并仍要 barrier。</div>
+  <div class="reject"><strong>用更严 schema「逼模型想深一点」</strong> — D1：schema 管形状；深度靠 rubric/独立 critic，过严只会空转重试。</div>
 </section>
 
 <section>
-  <h2>Suggested Pursuit Order</h2>
+  <h2>Suggested Pursuit Order（Wave 2）</h2>
   <ol>
-    <li><strong>先契约后配方：</strong>#1 闸门记录 → 解锁 #2/#3 的可编程分支。</li>
-    <li><strong>低成本韧性：</strong>#5 面包屑 + #6 诚实收口，贴合现有 hook 架构。</li>
-    <li><strong>可卖点质量：</strong>#2 两段验证 + #3 对抗 done，直接抬升「不会假绿」。</li>
-    <li><strong>可复制工序：</strong>#4 GCF 作为首个金牌配方 → 再铺 #7 库。</li>
+    <li><strong>先看见再加强：</strong>#1 结构化面包屑（含门禁状态注入）— 立刻放大已有 L1 门的可用性。</li>
+    <li><strong>停得住：</strong>#2 hitCeiling — 与 turn cap 同层，形成「过门 / 触顶」双语义。</li>
+    <li><strong>第一个金牌配方：</strong>#3 GCF — 可卖、可 dogfood、为 #7 铺路。</li>
+    <li><strong>发现循环：</strong>#5 loop-until-dry（与 GCF 可并行设计、串行实现）。</li>
+    <li><strong>规划质量：</strong>#6 plan 多透镜（可选开关，不挡主路径）。</li>
+    <li><strong>信任上限：</strong>#4 L2 critic 隔离 — 等 L1 门 dogfood 稳定与 Snow 能力确认。</li>
+    <li><strong>平台化：</strong>#7 配方库 — 至少 2 个金牌配方 + 1 个 fixture 后再脚手架。</li>
   </ol>
-  <p>与 maturity PR 栈关系：建议 U1–U10 可信度落地后（或并行不冲突的文档/skill 层），再开闸门契约；避免在 verify 仍可能静默失败时堆更复杂质量门。</p>
+  <div class="note">
+    <strong>与已有 plan 关系：</strong>
+    <code>001-maturity-top10</code> 与 <code>002-completion-gates</code> 不再作为 ideation 主线。
+    Wave 2 任选一条进 <code>ce-brainstorm</code> 写 requirements-only 统一计划即可。
+  </div>
+</section>
+
+<section>
+  <h2>Cookbook → OMS 映射速查</h2>
+  <table>
+    <thead>
+      <tr><th>cookbook 模式</th><th>OMS 现状</th><th>Wave 2 落点</th></tr>
+    </thead>
+    <tbody>
+      <tr><td>验证门循环 / pass schema</td><td>L1 完成门已落地</td><td>面包屑暴露 + L2</td></tr>
+      <tr><td>持久循环 + hitCeiling</td><td>turn cap 有，语义弱</td><td>#2</td></tr>
+      <tr><td>状态句柄 / 面包屑</td><td>散文注入</td><td>#1</td></tr>
+      <tr><td>GCF / gatedFix</td><td>cleanup/qa 散装</td><td>#3</td></tr>
+      <tr><td>Loop-until-dry</td><td>缺产品形状</td><td>#5</td></tr>
+      <tr><td>Judge panel / plan-hunter</td><td>plan 单路径</td><td>#6</td></tr>
+      <tr><td>质量三拍 ③ 代码收口</td><td>部分（ledger）</td><td>#1 journal、team 过滤、#6 计票</td></tr>
+      <tr><td>Workflow 库 + 回归</td><td>commands 字符串</td><td>#7</td></tr>
+      <tr><td>Worktree 隔离</td><td>team 已有</td><td>合并可观测短名单</td></tr>
+    </tbody>
+  </table>
 </section>
 
 <footer>
-  Artifact generated by ce-ideate · run grounding against local OMS + workflow-cookbook docs (2026-07-09).<br/>
-  Next step is selection → <code>ce-brainstorm</code> on one survivor, not direct coding.
+  Artifact updated by ce-ideate (continue) · 2026-07-09 · grounding: local OMS
+  <code>feat/completion-gates</code> + workflow-cookbook ch.23–26 / app-F.<br/>
+  Next step is selection → <code>ce-brainstorm</code> on one Wave-2 survivor, not direct coding.
 </footer>
 </main>
 </body>
