@@ -1,6 +1,6 @@
 {
   "name": "oh-my-snow",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Oh-My-Snow — Autonomous orchestration plugin for Snow CLI",
   "type": "module",
   "main": "dist/mcp-server.js",
