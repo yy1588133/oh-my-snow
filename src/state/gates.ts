@@ -156,6 +156,79 @@ function isEntryExpired(entry: LedgerEntry): boolean {
 	return Date.now() - t > VERIFICATION_TTL_MS;
 }
 
+/**
+ * Re-stamp approved ledger entries so a handoff restore does not silently
+ * lose R3 gate progress solely due to VERIFICATION_TTL_MS (2h).
+ * Used only on intentional resume — not on ordinary load.
+ */
+export function refreshLedgerForResume(
+	ledger: VerificationLedger | null | undefined,
+	nowIso?: string,
+): VerificationLedger {
+	const now = nowIso ?? new Date().toISOString();
+	const src = ledger?.entries && typeof ledger.entries === 'object' ? ledger.entries : {};
+	const entries: Record<string, LedgerEntry> = {};
+	for (const [key, entry] of Object.entries(src)) {
+		if (!entry || typeof entry !== 'object') continue;
+		if (entry.status !== 'approved') {
+			entries[key] = structuredClone(entry);
+			continue;
+		}
+		entries[key] = {
+			...structuredClone(entry),
+			requestedAt: now,
+			resolvedAt: now,
+		};
+	}
+	return {version: 1, entries};
+}
+
+/** Preview/UI line: which gate scopes are valid vs missing (TTL-aware). */
+export function formatGatesPreviewLine(
+	gatesRequired: boolean,
+	ledger: VerificationLedger | null | undefined,
+	nowMs: number = Date.now(),
+): string {
+	if (!gatesRequired) {
+		return 'Gates: off / not applicable (gatesRequired=false)';
+	}
+	const entries = ledger?.entries && typeof ledger.entries === 'object' ? ledger.entries : {};
+	const passed: string[] = [];
+	const missing: string[] = [];
+	const expired: string[] = [];
+	// Align with hard-stop panel order (task gates first, then quality/completion).
+	const order: GateScope[] = [
+		'task-complete',
+		'task-reconcile',
+		'code-quality',
+		'completion',
+	];
+	for (const scope of order) {
+		const e = entries[scope];
+		if (!e || e.status !== 'approved') {
+			missing.push(scope);
+			continue;
+		}
+		const t = e.requestedAt
+			? new Date(e.requestedAt).getTime()
+			: e.resolvedAt
+				? new Date(e.resolvedAt).getTime()
+				: 0;
+		const fresh = t > 0 && nowMs - t <= VERIFICATION_TTL_MS;
+		if (fresh) {
+			passed.push(scope);
+		} else {
+			expired.push(scope);
+			missing.push(scope);
+		}
+	}
+	if (missing.length === 0) {
+		return `Gates: required — all approved (${passed.join(', ')})`;
+	}
+	const expNote = expired.length > 0 ? ` expired=[${expired.join(', ')}]` : '';
+	return `Gates: required — ok=[${passed.join(', ') || 'none'}] missing=[${missing.join(', ')}]${expNote}`;
+}
+
 export function getLedgerApproval(
 	scope: GateScope,
 	storyId: string | null = null,

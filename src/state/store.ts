@@ -36,6 +36,8 @@ import {
 	canEnterVerifying,
 	canEnterDone,
 	formatLedgerSummary,
+	refreshLedgerForResume,
+	formatGatesPreviewLine,
 	isAllowlistedStrictReviewer,
 	requiresStrictReviewer,
 	isSelfReviewerId,
@@ -641,6 +643,8 @@ export function deleteState(): boolean {
 	// Phase 3 US-007: also clear verification-state.json on oms-stop so a
 	// fresh session doesn't inherit a stale approval from the prior run.
 	deleteVerificationState();
+	// Intentionally DO NOT delete handoff.json — hard-stop handoff must survive
+	// cleanup so /oms:resume can restore progress after oms-stop (plan 005 R4b).
 
 	// Surface partial failure so oms-stop does not claim success while a
 	// residual verify.cmd could still drive the next session's silent gate.
@@ -2103,6 +2107,8 @@ export {
 	formatLedgerSummary,
 	getLedgerApproval,
 	invalidatePostDoneGates,
+	refreshLedgerForResume,
+	formatGatesPreviewLine,
 	isAllowlistedStrictReviewer,
 	requiresStrictReviewer,
 	isSelfReviewerId,

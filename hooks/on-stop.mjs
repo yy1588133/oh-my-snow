@@ -28,6 +28,7 @@ import {
 	buildHardStopReport,
 } from './lib/status-panel.mjs';
 import { buildContinuationPrompt } from './lib/continuation-prompt.mjs';
+import { writeHandoffFromState } from './lib/handoff.mjs';
 
 // ── Git diff detection ──
 
@@ -274,7 +275,37 @@ async function main() {
 
 	// Hard stop: end the conversation. Do NOT set stage=done or clear state.
 	if (state.turnCount > hardMax) {
-		process.stderr.write(buildHardStopReport(panelCtx));
+		let handoffLine = 'unavailable';
+		try {
+			// R2: capture PRD/verify points when available (else null → preview says unknown)
+			let prdSummary = null;
+			if (prd && typeof prd === 'object') {
+				const stories = Array.isArray(prd.stories) ? prd.stories : [];
+				const passed = stories.filter((s) => s && s.passes === true).length;
+				prdSummary =
+					stories.length > 0
+						? `PRD stories ${passed}/${stories.length} pass`
+						: typeof prd.title === 'string'
+							? `PRD: ${prd.title.slice(0, 80)}`
+							: 'PRD present (no stories)';
+			}
+			const verifyNote = buildErrorPrefix
+				? String(buildErrorPrefix).slice(0, 180)
+				: null;
+			const hw = writeHandoffFromState(state, {
+				reason: 'hard_ceiling',
+				prdSummary,
+				verifyNote,
+			});
+			handoffLine = hw.ok
+				? `written (${hw.path})`
+				: `unavailable (${hw.error || 'write failed'})`;
+		} catch (e) {
+			handoffLine = `unavailable (${e instanceof Error ? e.message : String(e)})`;
+		}
+		process.stderr.write(
+			buildHardStopReport(panelCtx, {handoffLine}),
+		);
 		process.exit(0);
 	}
 

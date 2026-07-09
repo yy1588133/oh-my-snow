@@ -15,6 +15,7 @@
  *   oms-set-team       — Set the team name reference + activate snow-cli Team Mode
  *   oms-prd            — Ralph PRD management (init/refine/story/criteria/progress)
  *   oms-stop           — End the orchestration session
+ *   oms-resume         — Preview / confirm hard-stop handoff resume
  */
 
 import {McpServer} from '@modelcontextprotocol/sdk/server/mcp.js';
@@ -46,6 +47,7 @@ import {
 	logProgress,
 	readProgress,
 	deletePrd,
+	saveState,
 	hasMatchingApproval,
 	requestVerification,
 	submitApproval,
@@ -66,6 +68,22 @@ import {
 	type RefinedStoryInput,
 	type GateScope,
 } from './state/store.js';
+import {
+	readHandoff,
+	formatHandoffPreview,
+	detectStale,
+	deleteHandoff,
+	planResumePath,
+	DEFAULT_SOFT,
+	DEFAULT_HARD,
+	type HandoffPayload,
+} from './state/handoff.js';
+import {
+	loadLedger,
+	saveLedger,
+	refreshLedgerForResume,
+	invalidatePostDoneGates,
+} from './state/gates.js';
 import {writeFileSync, mkdirSync, existsSync} from 'fs';
 import {join} from 'path';
 import {homedir} from 'os';
@@ -2256,6 +2274,195 @@ server.registerTool(
 					{
 						type: 'text' as const,
 						text: `✅ OMS session stopped.\n\n${summary}`,
+					},
+				],
+			};
+		} catch (error) {
+			return {
+				content: [
+					{type: 'text' as const, text: `Error: ${(error as Error).message}`},
+				],
+				isError: true,
+			};
+		}
+	},
+);
+
+// ── Tool: oms-resume ──
+
+server.registerTool(
+	'oms-resume',
+	{
+		description:
+			'Resume after hard-stop handoff. action "preview" is read-only (summary + path plan + stale warning). ' +
+			'action "confirm" restores progress+gates (NOT chat) and MUST only run after explicit user approval in the conversation ' +
+			'(no machine nonce in MVP — agents must not auto-confirm). Prefer /oms:resume command flow. ' +
+			'Successful confirm consumes handoff.json. Cross-session handoff+live is refused.',
+		inputSchema: {
+			action: z
+				.enum(['preview', 'confirm'])
+				.describe('preview = read-only summary; confirm = apply resume AFTER user approval only'),
+		},
+	},
+	params => {
+		try {
+			const handoff = readHandoff();
+			const live = loadState();
+			const liveActive =
+				!!live &&
+				(live.stage as string) !== 'done' &&
+				(live.stage as string) !== 'idle';
+			const plan = planResumePath(handoff, liveActive ? live : null);
+
+			if (params.action === 'preview') {
+				if (plan.path === 'none') {
+					return {
+						content: [
+							{
+								type: 'text' as const,
+								text:
+									'No handoff.json and no active OMS session to resume.\n' +
+									'Suggested: start fresh with /oms:auto <goal>, or check .snow/oms-state/.',
+							},
+						],
+						isError: true,
+					};
+				}
+				const stale = detectStale(handoff?.gitAnchor ?? null);
+				const text = formatHandoffPreview(handoff, liveActive ? live : null, stale);
+				return {content: [{type: 'text' as const, text}]};
+			}
+
+			// confirm
+			if (plan.path === 'none') {
+				return {
+					content: [
+						{
+							type: 'text' as const,
+							text:
+								'Cannot confirm resume: no handoff.json and no active session.\n' +
+								'Use /oms:auto to start a new session.',
+						},
+					],
+					isError: true,
+				};
+			}
+			if (plan.path === 'conflict') {
+				return {
+					content: [
+						{
+							type: 'text' as const,
+							text:
+								`[OMS:RESUME BLOCKED] Session conflict.\n${plan.reason}\n` +
+								`Handoff goal: ${handoff?.goal ?? '?'}\n` +
+								`Live goal: ${live?.goal ?? '?'}\n` +
+								`Do not mix foreign handoff ledger into a different live session.`,
+						},
+					],
+					isError: true,
+				};
+			}
+
+			const soft = DEFAULT_SOFT;
+			const hard = DEFAULT_HARD;
+			const now = new Date().toISOString();
+
+			if (plan.path === 'A' && live) {
+				// Path A: same session (or live-only) — reset turns; never import foreign ledger
+				live.turnCount = 0;
+				live.maxIterations = soft;
+				live.hardMaxIterations = hard;
+				live.updatedAt = now;
+				saveState(live);
+				// Same-session handoff may fill an empty live ledger (e.g. ledger file lost)
+				const sameSession =
+					!!handoff &&
+					(!handoff.sessionId ||
+						!live.sessionId ||
+						handoff.sessionId === live.sessionId);
+				if (sameSession && handoff?.ledger?.entries) {
+					const cur = loadLedger();
+					const curKeys = Object.keys(cur.entries || {});
+					if (curKeys.length === 0 && Object.keys(handoff.ledger.entries).length > 0) {
+						saveLedger(refreshLedgerForResume(handoff.ledger, now));
+					}
+				}
+				// Consume handoff so it cannot poison a later session
+				if (handoff) {
+					deleteHandoff();
+				}
+				return {
+					content: [
+						{
+							type: 'text' as const,
+							text:
+								`[OMS:RESUME CONFIRMED] Live session reactivated (path A).\n` +
+								`Progress + gates only — NOT a chat time machine.\n` +
+								`Goal: ${live.goal}\n` +
+								`Stage: ${live.stage}\n` +
+								`Tasks: ${(live.tasks || []).filter(t => t.completed).length}/${(live.tasks || []).length}\n` +
+								`Turns reset: 0 / soft ${soft} / hard ${hard}\n` +
+								`Handoff consumed: ${handoff ? 'yes' : 'n/a'}\n` +
+								`Continue self-drive under existing completion gates.`,
+						},
+					],
+				};
+			}
+
+			// Path B: rebuild from handoff — clear residues first (oms-start parity), keep handoff until done
+			const h = handoff as HandoffPayload;
+			// deleteState preserves handoff.json (R4b) and clears verification-state, ledger, pending-verify, state
+			deleteState();
+			const rebuilt = createState(h.goal || 'resumed session', h.verifyCommand || '');
+			const handoffStage = ['planning', 'executing', 'verifying', 'done'].includes(h.stage)
+				? h.stage
+				: 'executing';
+			let remappedFromDone = false;
+			rebuilt.stage = handoffStage as typeof rebuilt.stage;
+			// Avoid done on resume unless handoff truly done — remap to executing
+			if (rebuilt.stage === 'done') {
+				rebuilt.stage = 'executing';
+				remappedFromDone = true;
+			}
+			rebuilt.tasks = Array.isArray(h.tasks) ? h.tasks : [];
+			rebuilt.turnCount = 0;
+			rebuilt.maxIterations = soft;
+			rebuilt.hardMaxIterations = hard;
+			rebuilt.gatesRequired = h.gatesRequired === true;
+			rebuilt.lastGateFailure = h.lastGateFailure ?? null;
+			if (h.teamName) rebuilt.teamName = h.teamName;
+			rebuilt.sessionId = h.sessionId || rebuilt.sessionId;
+			rebuilt.updatedAt = now;
+			rebuilt.stageHistory = [
+				...(Array.isArray(rebuilt.stageHistory) ? rebuilt.stageHistory : []),
+				{stage: rebuilt.stage, timestamp: now},
+			];
+			saveState(rebuilt);
+			if (h.ledger) {
+				saveLedger(refreshLedgerForResume(h.ledger, now));
+			}
+			if (remappedFromDone) {
+				// Match setStage(done|verifying -> executing) gate invalidation
+				invalidatePostDoneGates();
+			}
+			if (h.verifyCommand) {
+				saveVerifyCommandFile(h.verifyCommand);
+			}
+			deleteHandoff();
+
+			return {
+				content: [
+					{
+						type: 'text' as const,
+						text:
+							`[OMS:RESUME CONFIRMED] Restored from handoff.json (path B).\n` +
+							`Progress + gates only — NOT a chat time machine.\n` +
+							`Goal: ${rebuilt.goal}\n` +
+							`Stage: ${rebuilt.stage}\n` +
+							`Tasks: ${rebuilt.tasks.filter(t => t.completed).length}/${rebuilt.tasks.length}\n` +
+							`Turns reset: 0 / soft ${soft} / hard ${hard}\n` +
+							`Gate timestamps refreshed; handoff.json consumed.\n` +
+							`Continue self-drive under completion gates; missing gates still required.`,
 					},
 				],
 			};
