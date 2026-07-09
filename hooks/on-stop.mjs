@@ -277,10 +277,25 @@ async function main() {
 	if (state.turnCount > hardMax) {
 		let handoffLine = 'unavailable';
 		try {
+			// R2: capture PRD/verify points when available (else null → preview says unknown)
+			let prdSummary = null;
+			if (prd && typeof prd === 'object') {
+				const stories = Array.isArray(prd.stories) ? prd.stories : [];
+				const passed = stories.filter((s) => s && s.passes === true).length;
+				prdSummary =
+					stories.length > 0
+						? `PRD stories ${passed}/${stories.length} pass`
+						: typeof prd.title === 'string'
+							? `PRD: ${prd.title.slice(0, 80)}`
+							: 'PRD present (no stories)';
+			}
+			const verifyNote = buildErrorPrefix
+				? String(buildErrorPrefix).slice(0, 180)
+				: null;
 			const hw = writeHandoffFromState(state, {
 				reason: 'hard_ceiling',
-				prdSummary: null,
-				verifyNote: null,
+				prdSummary,
+				verifyNote,
 			});
 			handoffLine = hw.ok
 				? `written (${hw.path})`

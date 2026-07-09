@@ -72,11 +72,18 @@ import {
 	readHandoff,
 	formatHandoffPreview,
 	detectStale,
+	deleteHandoff,
+	planResumePath,
 	DEFAULT_SOFT,
 	DEFAULT_HARD,
 	type HandoffPayload,
 } from './state/handoff.js';
-import {loadLedger, saveLedger} from './state/gates.js';
+import {
+	loadLedger,
+	saveLedger,
+	refreshLedgerForResume,
+	invalidatePostDoneGates,
+} from './state/gates.js';
 import {writeFileSync, mkdirSync, existsSync} from 'fs';
 import {join} from 'path';
 import {homedir} from 'os';
@@ -2287,11 +2294,14 @@ server.registerTool(
 	'oms-resume',
 	{
 		description:
-			'Resume after hard-stop handoff. action "preview" is read-only (summary + stale warning); "confirm" restores progress+gates (NOT chat) after user approval. Prefer /oms:resume command flow.',
+			'Resume after hard-stop handoff. action "preview" is read-only (summary + path plan + stale warning). ' +
+			'action "confirm" restores progress+gates (NOT chat) and MUST only run after explicit user approval in the conversation ' +
+			'(no machine nonce in MVP — agents must not auto-confirm). Prefer /oms:resume command flow. ' +
+			'Successful confirm consumes handoff.json. Cross-session handoff+live is refused.',
 		inputSchema: {
 			action: z
 				.enum(['preview', 'confirm'])
-				.describe('preview = read-only summary; confirm = apply resume after user approval'),
+				.describe('preview = read-only summary; confirm = apply resume AFTER user approval only'),
 		},
 	},
 	params => {
@@ -2299,12 +2309,13 @@ server.registerTool(
 			const handoff = readHandoff();
 			const live = loadState();
 			const liveActive =
-				live &&
+				!!live &&
 				(live.stage as string) !== 'done' &&
 				(live.stage as string) !== 'idle';
+			const plan = planResumePath(handoff, liveActive ? live : null);
 
 			if (params.action === 'preview') {
-				if (!handoff && !liveActive) {
+				if (plan.path === 'none') {
 					return {
 						content: [
 							{
@@ -2323,7 +2334,7 @@ server.registerTool(
 			}
 
 			// confirm
-			if (!handoff && !liveActive) {
+			if (plan.path === 'none') {
 				return {
 					content: [
 						{
@@ -2336,25 +2347,49 @@ server.registerTool(
 					isError: true,
 				};
 			}
+			if (plan.path === 'conflict') {
+				return {
+					content: [
+						{
+							type: 'text' as const,
+							text:
+								`[OMS:RESUME BLOCKED] Session conflict.\n${plan.reason}\n` +
+								`Handoff goal: ${handoff?.goal ?? '?'}\n` +
+								`Live goal: ${live?.goal ?? '?'}\n` +
+								`Do not mix foreign handoff ledger into a different live session.`,
+						},
+					],
+					isError: true,
+				};
+			}
 
 			const soft = DEFAULT_SOFT;
 			const hard = DEFAULT_HARD;
 			const now = new Date().toISOString();
 
-			if (liveActive && live) {
-				// Path A: reactivate live state — reset turns only
+			if (plan.path === 'A' && live) {
+				// Path A: same session (or live-only) — reset turns; never import foreign ledger
 				live.turnCount = 0;
 				live.maxIterations = soft;
 				live.hardMaxIterations = hard;
 				live.updatedAt = now;
 				saveState(live);
-				// If handoff has ledger snapshot and live ledger empty, restore
-				if (handoff?.ledger?.entries) {
+				// Same-session handoff may fill an empty live ledger (e.g. ledger file lost)
+				const sameSession =
+					!!handoff &&
+					(!handoff.sessionId ||
+						!live.sessionId ||
+						handoff.sessionId === live.sessionId);
+				if (sameSession && handoff?.ledger?.entries) {
 					const cur = loadLedger();
 					const curKeys = Object.keys(cur.entries || {});
 					if (curKeys.length === 0 && Object.keys(handoff.ledger.entries).length > 0) {
-						saveLedger(handoff.ledger);
+						saveLedger(refreshLedgerForResume(handoff.ledger, now));
 					}
+				}
+				// Consume handoff so it cannot poison a later session
+				if (handoff) {
+					deleteHandoff();
 				}
 				return {
 					content: [
@@ -2367,22 +2402,27 @@ server.registerTool(
 								`Stage: ${live.stage}\n` +
 								`Tasks: ${(live.tasks || []).filter(t => t.completed).length}/${(live.tasks || []).length}\n` +
 								`Turns reset: 0 / soft ${soft} / hard ${hard}\n` +
+								`Handoff consumed: ${handoff ? 'yes' : 'n/a'}\n` +
 								`Continue self-drive under existing completion gates.`,
 						},
 					],
 				};
 			}
 
-			// Path B: rebuild from handoff
+			// Path B: rebuild from handoff — clear residues first (oms-start parity), keep handoff until done
 			const h = handoff as HandoffPayload;
+			// deleteState preserves handoff.json (R4b) and clears verification-state, ledger, pending-verify, state
+			deleteState();
 			const rebuilt = createState(h.goal || 'resumed session', h.verifyCommand || '');
-			// createState already saved — overwrite with handoff fields
-			rebuilt.stage = (['planning', 'executing', 'verifying', 'done'].includes(h.stage)
+			const handoffStage = ['planning', 'executing', 'verifying', 'done'].includes(h.stage)
 				? h.stage
-				: 'executing') as typeof rebuilt.stage;
-			// Avoid done on resume unless handoff truly done
+				: 'executing';
+			let remappedFromDone = false;
+			rebuilt.stage = handoffStage as typeof rebuilt.stage;
+			// Avoid done on resume unless handoff truly done — remap to executing
 			if (rebuilt.stage === 'done') {
 				rebuilt.stage = 'executing';
+				remappedFromDone = true;
 			}
 			rebuilt.tasks = Array.isArray(h.tasks) ? h.tasks : [];
 			rebuilt.turnCount = 0;
@@ -2393,18 +2433,22 @@ server.registerTool(
 			if (h.teamName) rebuilt.teamName = h.teamName;
 			rebuilt.sessionId = h.sessionId || rebuilt.sessionId;
 			rebuilt.updatedAt = now;
-			// stageHistory: mark resume
 			rebuilt.stageHistory = [
 				...(Array.isArray(rebuilt.stageHistory) ? rebuilt.stageHistory : []),
 				{stage: rebuilt.stage, timestamp: now},
 			];
 			saveState(rebuilt);
 			if (h.ledger) {
-				saveLedger(h.ledger);
+				saveLedger(refreshLedgerForResume(h.ledger, now));
+			}
+			if (remappedFromDone) {
+				// Match setStage(done|verifying -> executing) gate invalidation
+				invalidatePostDoneGates();
 			}
 			if (h.verifyCommand) {
 				saveVerifyCommandFile(h.verifyCommand);
 			}
+			deleteHandoff();
 
 			return {
 				content: [
@@ -2417,6 +2461,7 @@ server.registerTool(
 							`Stage: ${rebuilt.stage}\n` +
 							`Tasks: ${rebuilt.tasks.filter(t => t.completed).length}/${rebuilt.tasks.length}\n` +
 							`Turns reset: 0 / soft ${soft} / hard ${hard}\n` +
+							`Gate timestamps refreshed; handoff.json consumed.\n` +
 							`Continue self-drive under completion gates; missing gates still required.`,
 					},
 				],

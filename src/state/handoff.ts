@@ -16,6 +16,7 @@ import {createHash} from 'crypto';
 import {execFileSync} from 'child_process';
 import type {OmsState, Task} from './store.js';
 import type {VerificationLedger} from './gates.js';
+import {formatGatesPreviewLine} from './gates.js';
 
 export const HANDOFF_VERSION = 1 as const;
 export const HANDOFF_FILENAME = 'handoff.json';
@@ -218,37 +219,130 @@ export function deleteHandoff(): void {
 	}
 }
 
+/** Defaults match createState */
+export const DEFAULT_SOFT = 50;
+export const DEFAULT_HARD = 200;
+
+export type ResumePathPlan =
+	| {path: 'A'; reason: string}
+	| {path: 'B'; reason: string}
+	| {path: 'conflict'; reason: string}
+	| {path: 'none'; reason: string};
+
+/**
+ * Decide which confirm path would run (must stay in sync with oms-resume).
+ * Path A only when live is active and either no handoff or same sessionId.
+ */
+export function planResumePath(
+	handoff: HandoffPayload | null,
+	liveState: OmsState | null,
+): ResumePathPlan {
+	const liveActive =
+		!!liveState &&
+		(liveState.stage as string) !== 'done' &&
+		(liveState.stage as string) !== 'idle';
+	if (!handoff && !liveActive) {
+		return {path: 'none', reason: 'no handoff.json and no active session'};
+	}
+	if (liveActive && liveState) {
+		if (handoff && handoff.sessionId && liveState.sessionId && handoff.sessionId !== liveState.sessionId) {
+			return {
+				path: 'conflict',
+				reason:
+					`handoff session ${handoff.sessionId} ≠ live session ${liveState.sessionId} — ` +
+					`refusing Path A. Stop the live session (oms-stop keeps handoff) then confirm to restore handoff (Path B), ` +
+					`or remove handoff.json if you only want the live session.`,
+			};
+		}
+		return {
+			path: 'A',
+			reason: handoff
+				? 'same-session (or undated) handoff + active live — reactivate live, reset turns'
+				: 'active live, no handoff — reactivate live, reset turns',
+		};
+	}
+	if (handoff) {
+		return {path: 'B', reason: 'no active live session — rebuild from handoff.json'};
+	}
+	return {path: 'none', reason: 'nothing to resume'};
+}
+
 export function formatHandoffPreview(
 	handoff: HandoffPayload | null,
 	liveState: OmsState | null,
 	stale: StaleResult,
 ): string {
+	const plan = planResumePath(handoff, liveState);
 	const source = handoff
 		? 'handoff.json'
 		: liveState
 			? 'live state (no handoff file)'
 			: 'none';
-	const goal = handoff?.goal ?? liveState?.goal ?? '(none)';
-	const stage = handoff?.stage ?? liveState?.stage ?? '?';
-	const tasks = handoff?.tasks ?? liveState?.tasks ?? [];
+	// Preview content for the snapshot confirm will apply:
+	// Path A / conflict-with-live: prefer live for goal/stage/tasks when same session;
+	// Path B: handoff only.
+	const useHandoffFields = plan.path === 'B' || (plan.path === 'A' && !liveState);
+	const goal = useHandoffFields
+		? (handoff?.goal ?? liveState?.goal ?? '(none)')
+		: (liveState?.goal ?? handoff?.goal ?? '(none)');
+	const stage = useHandoffFields
+		? (handoff?.stage ?? liveState?.stage ?? '?')
+		: (liveState?.stage ?? handoff?.stage ?? '?');
+	const tasks = useHandoffFields
+		? (handoff?.tasks ?? liveState?.tasks ?? [])
+		: (liveState?.tasks ?? handoff?.tasks ?? []);
 	const open = tasks.filter(t => t && !t.completed);
 	const gatesRequired = handoff
 		? handoff.gatesRequired
 		: liveState?.gatesRequired === true;
 	const lgf = handoff?.lastGateFailure ?? liveState?.lastGateFailure;
+	const turnCur = useHandoffFields
+		? (handoff?.turnCount ?? liveState?.turnCount ?? 0)
+		: (liveState?.turnCount ?? handoff?.turnCount ?? 0);
+	const turnSoft = useHandoffFields
+		? (handoff?.maxIterations ?? liveState?.maxIterations ?? DEFAULT_SOFT)
+		: (liveState?.maxIterations ?? handoff?.maxIterations ?? DEFAULT_SOFT);
+	const turnHard = useHandoffFields
+		? (handoff?.hardMaxIterations ?? liveState?.hardMaxIterations ?? DEFAULT_HARD)
+		: (liveState?.hardMaxIterations ?? handoff?.hardMaxIterations ?? DEFAULT_HARD);
+	const ledgerForGates =
+		plan.path === 'B'
+			? handoff?.ledger
+			: plan.path === 'A' && handoff?.sessionId && liveState?.sessionId === handoff.sessionId
+				? handoff?.ledger
+				: handoff?.ledger ?? undefined;
+	const gatesLine = formatGatesPreviewLine(gatesRequired, ledgerForGates ?? null);
+	const prdSummary = handoff?.prdSummary ?? null;
+	const verifyNote = handoff?.verifyNote ?? null;
 
 	const lines = [
 		'[OMS:RESUME PREVIEW] Handoff is NOT a time machine — only progress + gates, not chat history.',
 		`Source: ${source}`,
+		`Confirm path: ${plan.path} — ${plan.reason}`,
+		handoff && liveState
+			? `Sessions: handoff=${handoff.sessionId || '?'} live=${liveState.sessionId || '?'}`
+			: handoff
+				? `Handoff session: ${handoff.sessionId || '?'}`
+				: liveState
+					? `Live session: ${liveState.sessionId || '?'}`
+					: '',
 		`Goal: ${String(goal).slice(0, 200)}`,
 		`Stage: ${stage}`,
+		`Turns at snapshot: ${turnCur} / soft ${turnSoft} / hard ${turnHard}`,
 		`Tasks: ${tasks.filter(t => t?.completed).length}/${tasks.length} complete; open: ${open.length}`,
 		...open.slice(0, 12).map(t => `  - [${t.id}] ${t.description}`),
 		open.length > 12 ? `  … +${open.length - 12} more` : '',
 		`GatesRequired: ${gatesRequired}`,
+		gatesLine,
 		lgf
 			? `LastGateFailure: ${lgf.scope} — ${String(lgf.summary || '').slice(0, 120)}`
 			: 'LastGateFailure: none',
+		prdSummary
+			? `PRD: ${String(prdSummary).slice(0, 160)}`
+			: 'PRD: unknown / none in handoff',
+		verifyNote
+			? `Verify: ${String(verifyNote).slice(0, 160)}`
+			: 'Verify: unknown / none in handoff',
 		handoff
 			? `Handoff created: ${handoff.createdAt} reason=${handoff.reason}`
 			: 'Handoff file: absent',
@@ -258,13 +352,13 @@ export function formatHandoffPreview(
 				? `Stale check: unknown (${stale.reason})`
 				: 'Stale check: fresh (or no detectable change)',
 		'',
-		'To continue: call oms-resume action:"confirm" after user approval.',
-		'This will reset turnCount to 0 and soft/hard to session defaults (50/200).',
+		plan.path === 'conflict'
+			? 'CONFIRM BLOCKED until session conflict is resolved (see Confirm path above).'
+			: 'To continue: call oms-resume action:"confirm" ONLY after explicit user approval in this conversation (no silent auto-confirm).',
+		'Confirm will reset turnCount to 0 and soft/hard to session defaults (50/200).',
+		'Confirm refreshes approved gate timestamps so overnight resume does not drop R3 credit via TTL.',
+		'Successful confirm consumes handoff.json (deletes it).',
 	].filter(Boolean);
 
 	return lines.join('\n');
 }
-
-/** Defaults match createState */
-export const DEFAULT_SOFT = 50;
-export const DEFAULT_HARD = 200;

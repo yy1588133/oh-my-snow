@@ -175,7 +175,7 @@ Legacy sessions without `gatesRequired` keep the older completion-approval exemp
 | `/oms:release <context>`  | Release flow — version bump, changelog, git tag                                                |
 | `/oms:save <context>`     | Save session memory — snapshot state and extract reusable patterns                             |
 | `/oms:stop`               | Stop the active OMS session                                                                    |
-| `/oms:resume`             | After hard-stop: preview handoff → user confirms → restore progress + gates (not chat history) |
+| `/oms:resume`             | After hard-stop: preview handoff → user confirms → restore progress + gates (not chat). Confirms consume `handoff.json`; refuses handoff/live session mismatch |
 | `/oms:help`               | Show the full OMS usage guide                                                                  |
 
 ### Skill-Mapping Commands
