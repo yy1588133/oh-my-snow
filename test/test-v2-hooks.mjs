@@ -416,7 +416,14 @@ const isoDir35 = join(tmpdir(), `oms-test-35-${Date.now()}`);
 mkdirSync(isoDir35, { recursive: true });
 writeFileSync(join(isoDir35, 'state.json'), JSON.stringify({ ...baseState, stage: 'planning', turnCount: 1, goal: 'solo task' }, null, 2));
 const r35 = runHookFromDir(join(process.cwd(), 'hooks/on-stop.mjs'), JSON.stringify({ messages: [] }), isoDir35, isoDir35);
-assert('onStop: no teamName = single-agent prompt (backward compat)', r35.stderr.includes('Planning — Turn') && !r35.stderr.includes('Team Lead'), r35.stderr.slice(0, 400));
+// Slim continue (status panel de-dupe): header is "Planning" + see STATUS, not "Planning — Turn"
+assert(
+	'onStop: no teamName = single-agent prompt (backward compat)',
+	r35.stderr.includes('[OMS:CONTINUE] Planning') &&
+		!r35.stderr.includes('Team Lead') &&
+		r35.stderr.includes('[OMS:STATUS]'),
+	r35.stderr.slice(0, 400),
+);
 assert('onStop: no teamName = oms-add-task instruction preserved', r35.stderr.includes('oms-add-task'), r35.stderr.slice(0, 500));
 rmSync(isoDir35, { recursive: true, force: true });
 

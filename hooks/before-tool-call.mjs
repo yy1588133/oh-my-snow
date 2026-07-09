@@ -18,7 +18,8 @@
  *   This ensures the hook only fires for filesystem WRITE tools.
  */
 
-import { loadState, readStdin, appendErrorLog, inspectStateFile } from './lib/oms-state.mjs';
+import { loadState, readStdin, appendErrorLog, inspectStateFile, getStateDir } from './lib/oms-state.mjs';
+import { isOmsStateWritePath, isOmsStateWriteCommand } from './lib/oms-path-guard.mjs';
 
 // ── Stage enforcement matrix ──
 
@@ -210,19 +211,10 @@ async function main() {
 		process.exit(0);
 	}
 
-	// Protect OMS control-plane files from agent write bypass (completion-gates KTD8).
+	// Protect OMS control-plane files from agent write bypass.
+	// Anchor to real getStateDir() — do not substring-match unrelated docs.
 	const args = context.args || context.arguments || {};
-	const hitsOmsStatePath = (p) => {
-		const norm = String(p).replace(/\\/g, '/').toLowerCase();
-		return (
-			norm.includes('/.snow/oms-state/') ||
-			norm.includes('.snow/oms-state/') ||
-			norm.endsWith('.snow/oms-state') ||
-			/(^|\/)oms-state\//.test(norm) ||
-			norm.includes('verification-ledger') ||
-			norm.includes('verification-state.json')
-		);
-	};
+	const stateDir = getStateDir();
 	if (FILE_WRITE_TOOLS.has(toolName)) {
 		const pathCandidates = [
 			args.path,
@@ -233,31 +225,22 @@ async function main() {
 			args.target_file,
 			typeof args === 'string' ? args : '',
 		].filter(Boolean);
-		if (pathCandidates.some(hitsOmsStatePath)) {
+		if (pathCandidates.some((p) => isOmsStateWritePath(p, stateDir))) {
 			process.stderr.write(
-				`[OMS:BLOCKED] Cannot write under .snow/oms-state/ — gate ledger and session state are MCP-owned.\n` +
+				`[OMS:BLOCKED] Cannot write under OMS state dir — gate ledger and session state are MCP-owned.\n` +
 					`Use oms-prd submit-gate / request-verification / submit-approval and oms-set-stage instead.\n`,
 			);
 			process.exit(1);
 		}
 	}
-	// Terminal can rewrite ledger via shell redirect — block high-risk command strings.
+	// Terminal: block write/delete to state dir; allow read/inspect.
 	if (TERMINAL_TOOLS.has(toolName)) {
 		const cmd = String(
 			args.command || args.cmd || args.script || args.input || '',
-		).toLowerCase();
-		if (
-			cmd &&
-			(/\.snow[\\/]+oms-state/.test(cmd) ||
-				cmd.includes('verification-ledger') ||
-				cmd.includes('verification-state.json') ||
-				(/oms-state/.test(cmd) &&
-					(/>|>>|out-file|set-content|add-content|tee |copy |move |rm |del |remove-item/.test(
-						cmd,
-					))))
-		) {
+		);
+		if (cmd && isOmsStateWriteCommand(cmd, stateDir)) {
 			process.stderr.write(
-				`[OMS:BLOCKED] terminal-execute must not write/delete .snow/oms-state (including verification-ledger).\n` +
+				`[OMS:BLOCKED] terminal-execute must not write/delete OMS state (including verification-ledger).\n` +
 					`Gate state is MCP-owned. Use oms-prd / oms-set-stage tools instead.\n`,
 			);
 			process.exit(1);

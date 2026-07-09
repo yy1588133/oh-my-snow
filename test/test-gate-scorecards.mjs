@@ -82,10 +82,57 @@ const d1 = store.canEnterDone(true);
 ok('canEnterDone false when incomplete', d1.ok === false);
 ok('canEnterDone mentions missing', /missing|code-quality|completion/i.test(d1.reason));
 
-// 8. self reviewer blocked helpers
+// 8. self reviewer blocked helpers (bounded prefixes; no bare startsWith main)
 ok('main is self', store.isSelfReviewerId('main') === true);
+ok('executor is self', store.isSelfReviewerId('executor') === true);
+ok('main-agent is self (bounded prefix)', store.isSelfReviewerId('main-agent') === true);
+ok(
+	'maintainability is NOT self',
+	store.isSelfReviewerId('maintainability') === false,
+);
+ok('mainline is NOT self', store.isSelfReviewerId('mainline') === false);
 ok('oms_critic allowlisted', store.isAllowlistedStrictReviewer('oms_critic') === true);
+ok(
+	'#oms_reviewer-1 allowlisted',
+	store.isAllowlistedStrictReviewer('#oms_reviewer-1') === true,
+);
 ok('substring reviewer NOT allowlisted', store.isAllowlistedStrictReviewer('bot-reviewer') === false);
+ok(
+	'team:executor NOT allowlisted (no bare team: wildcard)',
+	store.isAllowlistedStrictReviewer('team:executor') === false,
+);
+ok(
+	'team:self NOT allowlisted',
+	store.isAllowlistedStrictReviewer('team:self') === false,
+);
+
+// 8b. code-quality requires non-empty diffStat (keywords alone insufficient)
+let cqThrew = false;
+try {
+	store.assertApprovingScorecard(
+		{pass: true, summary: 'ok', evidence: ['npm test passed']},
+		'code-quality',
+	);
+} catch {
+	cqThrew = true;
+}
+ok('code-quality without diffStat throws', cqThrew === true);
+let cqOk = false;
+try {
+	store.assertApprovingScorecard(
+		{
+			pass: true,
+			summary: 'ok',
+			evidence: ['reviewed'],
+			diffStat: '1 file changed',
+		},
+		'code-quality',
+	);
+	cqOk = true;
+} catch {
+	cqOk = false;
+}
+ok('code-quality with diffStat passes', cqOk === true);
 
 // 9. request-verification rejects self-gate scopes
 let threw = false;

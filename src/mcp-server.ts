@@ -1030,7 +1030,7 @@ server.registerTool(
 				.max(20000)
 				.optional()
 				.describe(
-					'JSON scorecard for submit-gate OR submit-approval (required for code-quality/completion): {pass,summary,evidence[],deferred?,diffStat?,noTasksReason?}',
+					'JSON scorecard for submit-gate OR submit-approval: {pass,summary,evidence[],deferred?,diffStat?,noTasksReason?}. code-quality REQUIRES non-empty diffStat.',
 				),
 			requestId: z
 				.string()
@@ -1909,7 +1909,7 @@ server.registerTool(
 							'missing': 'No pending verification exists. Call request-verification first.',
 							'forbidden':
 								'reviewerAgentId not allowlisted, scorecard missing/invalid for code-quality|completion, or code-quality without task-reconcile. ' +
-								'Use reviewerAgentId oms_critic|oms_reviewer|oms_architect and scorecard JSON with pass/summary/evidence (diffStat for code-quality).',
+								'Use reviewerAgentId oms_critic|oms_reviewer|oms_architect (not team:*) and scorecard JSON with pass/summary/evidence; code-quality requires non-empty diffStat.',
 						};
 						return {
 							content: [

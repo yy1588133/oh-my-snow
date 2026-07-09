@@ -219,15 +219,18 @@ export function invalidatePostDoneGates(): void {
 export function isSelfReviewerId(id: string): boolean {
 	const n = (id || '').trim().toLowerCase();
 	if (SELF_REVIEWER_IDS.has(n)) return true;
-	if (n.startsWith('main') || n.startsWith('executor')) return true;
+	// Bounded prefixes only — bare startsWith('main') misclassifies
+	// "maintainability" / "mainline" as self (negative-optimization fix).
+	if (n.startsWith('main-') || n.startsWith('executor-')) return true;
+	if (n.startsWith('main_') || n.startsWith('executor_')) return true;
 	return false;
 }
 
 export function isAllowlistedStrictReviewer(id: string): boolean {
 	const n = (id || '').trim().toLowerCase();
 	if (!n || isSelfReviewerId(n)) return false;
-	// Prefix/exact allowlist only — no substring includes() (review P1).
-	if (n.startsWith('team:')) return true;
+	// Exact / bounded suffix allowlist only. No bare team: wildcard (would
+	// allow team:executor self-sign). No substring includes().
 	const prefixes = [
 		'oms_critic',
 		'oms_reviewer',
@@ -304,26 +307,28 @@ export function assertApprovingScorecard(
 	if (!card.summary.trim()) {
 		throw new Error('scorecard.summary is required for approval');
 	}
+	if (scope === 'code-quality') {
+		// Hard field only — evidence keywords like "npm test" are not sufficient.
+		const ds = (card.diffStat || '').trim();
+		if (!ds) {
+			throw new Error(
+				'code-quality scorecard requires non-empty diffStat (evidence keywords alone are not enough)',
+			);
+		}
+		if (card.evidence.length === 0) {
+			throw new Error(
+				'code-quality scorecard.evidence must be a non-empty array',
+			);
+		}
+		return;
+	}
 	const hasEvidence =
 		card.evidence.length > 0 ||
 		(card.diffStat != null && card.diffStat.trim().length > 0);
 	if (!hasEvidence) {
 		throw new Error(
-			'scorecard.evidence (or diffStat for code-quality) must be non-empty for approval',
+			'scorecard.evidence (or diffStat) must be non-empty for approval',
 		);
-	}
-	if (scope === 'code-quality') {
-		const ds = (card.diffStat || '').trim();
-		const hasDiff =
-			ds.length > 0 ||
-			card.evidence.some(e =>
-				/\b(diff|git\s+diff|diffstat|build|npm\s+test|test\s+exit)\b/i.test(e),
-			);
-		if (!hasDiff) {
-			throw new Error(
-				'code-quality scorecard needs non-empty diffStat or evidence mentioning diff/build/test results',
-			);
-		}
 	}
 }
 
@@ -454,6 +459,34 @@ export function canEnterVerifying(opts: {
 	};
 }
 
+/**
+ * Resolve approval from an already-loaded ledger (single-read helper).
+ * Mirrors getLedgerApproval TTL/status rules without re-reading disk.
+ */
+function approvalFromLedger(
+	ledger: VerificationLedger,
+	scope: GateScope,
+	storyId: string | null = null,
+): LedgerEntry | null {
+	const key = ledgerKey(scope, storyId);
+	const entry = ledger.entries[key];
+	if (!entry || entry.status !== 'approved') return null;
+	if (scope === 'story' && entry.storyId !== storyId) return null;
+	if (isEntryExpired(entry)) return null;
+	return entry;
+}
+
+function formatLedgerSummaryFrom(ledger: VerificationLedger): string {
+	const keys = Object.keys(ledger.entries);
+	if (keys.length === 0) return '(no ledger approvals)';
+	return keys
+		.map(k => {
+			const e = ledger.entries[k];
+			return `  [${e.status}] ${k} reviewer=${e.reviewerAgentId ?? '-'} at ${e.resolvedAt}`;
+		})
+		.join('\n');
+}
+
 export function canEnterDone(gatesRequired: boolean): {
 	ok: boolean;
 	reason: string;
@@ -462,10 +495,12 @@ export function canEnterDone(gatesRequired: boolean): {
 		// Legacy path handled by caller via hasMatchingApproval completion only
 		return {ok: true, reason: ''};
 	}
+	// One disk read for all three scopes + failure summary (perf fix).
+	const ledger = loadLedger();
 	const missing: string[] = [];
 	const bad: string[] = [];
 	for (const scope of ['task-reconcile', 'code-quality', 'completion'] as GateScope[]) {
-		const e = getLedgerApproval(scope);
+		const e = approvalFromLedger(ledger, scope);
 		if (!e) {
 			missing.push(scope);
 			continue;
@@ -490,7 +525,7 @@ export function canEnterDone(gatesRequired: boolean): {
 		reason:
 			`Cannot transition to done — ${parts}\n` +
 			`Order: task-reconcile → code-quality → completion (independent critic), then oms-set-stage done.\n` +
-			`Ledger:\n${formatLedgerSummary()}`,
+			`Ledger:\n${formatLedgerSummaryFrom(ledger)}`,
 	};
 }
 

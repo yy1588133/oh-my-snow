@@ -2,6 +2,7 @@
 import {mkdtempSync, writeFileSync, readFileSync, existsSync} from 'fs';
 import {tmpdir} from 'os';
 import {join} from 'path';
+import {pathToFileURL} from 'url';
 import {spawnSync} from 'child_process';
 
 let pass = 0, fail = 0;
@@ -196,6 +197,44 @@ const ftOut = (ft.stderr || '') + (ft.stdout || '');
 ok('force-transition exit 2', ft.status === 2, `exit=${ft.status} out=${ftOut.slice(0, 200)}`);
 ok('force-transition has STATUS panel', ftOut.includes('[OMS:STATUS]'));
 ok('force-transition STAGE TRANSITION', ftOut.includes('[OMS:STAGE TRANSITION]'));
+
+// ── Continuation de-dupe (negative-optimization U5) ──
+const contPath = join(process.cwd(), 'hooks', 'lib', 'continuation-prompt.mjs');
+const cont = await import(pathToFileURL(contPath).href);
+const contState = {
+	stage: 'executing',
+	goal: 'Build the rocket',
+	tasks: [
+		{id: 'task_1', description: 'ignite', completed: false},
+		{id: 'task_2', description: 'launch', completed: false},
+	],
+	turnCount: 3,
+	maxIterations: 50,
+	hardMaxIterations: 200,
+};
+const slim = cont.buildContinuationPrompt(contState, 'a.ts | 1 +', null, {
+	withStatusPanel: true,
+});
+ok('slim continue references STATUS', slim.includes('[OMS:STATUS]'));
+ok(
+	'slim continue omits Goal: full line',
+	!/^Goal:\s/m.test(slim) && !slim.includes('Goal: Build the rocket'),
+);
+ok(
+	'slim continue omits full task table',
+	!slim.includes('Tasks (0/2):') && !slim.includes('[○] task_1:'),
+);
+ok('slim continue keeps stage actions', /oms-complete-task|oms-set-stage/.test(slim));
+const verifySlim = cont.buildContinuationPrompt(
+	{...contState, stage: 'verifying'},
+	'',
+	null,
+	{withStatusPanel: true},
+);
+ok(
+	'verifying still lists gate steps',
+	/task-reconcile/.test(verifySlim) && /completion/.test(verifySlim),
+);
 
 console.log(`\n${pass} passed, ${fail} failed`);
 process.exit(fail > 0 ? 1 : 0);
