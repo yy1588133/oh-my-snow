@@ -1,13 +1,25 @@
 # Oh-My-Snow (OMS)
 
+[![npm version](https://img.shields.io/npm/v/oh-my-snow.svg)](https://www.npmjs.com/package/oh-my-snow)
+[![Node.js](https://img.shields.io/node/v/oh-my-snow.svg)](https://www.npmjs.com/package/oh-my-snow)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](./LICENSE)
+
 > Autonomous orchestration plugin for Snow CLI — turning AI coding sessions into reliable, self-driving workflows.
 
 OMS wraps Snow CLI with a state machine, stage enforcement, auto-verification, and an orchestration loop that drives AI from goal to done — without losing track, skipping steps, or claiming success without actually making changes.
+
+| | |
+| --- | --- |
+| **npm** | [`oh-my-snow`](https://www.npmjs.com/package/oh-my-snow) |
+| **GitHub** | [yy1588133/oh-my-snow](https://github.com/yy1588133/oh-my-snow) |
+| **CLI** | `oms` (alias: `oh-my-snow`) |
+| **Requires** | Node.js ≥ 18, Snow CLI installed |
 
 ## Features
 
 - 🔄 **Autonomous orchestration loop** — AI plans, executes, verifies, fixes, and completes work automatically
 - 🚦 **Stage enforcement** — File edits are blocked during planning/verifying/done stages; the AI can't cheat the workflow
+- 🎫 **Completion gates** — Machine-readable scorecards before verifying and before done; oral "done" is blocked
 - 🔨 **Auto-verification** — Build/test runs automatically after every file edit during execution stage
 - 📝 **Structured planning** — Tasks are tracked with completion status; the AI knows exactly what's left
 - 🔍 **Text bypass detection** — If the AI claims to have made changes but `git diff` shows nothing, it gets called out
@@ -22,10 +34,18 @@ OMS wraps Snow CLI with a state machine, stage enforcement, auto-verification, a
 ```bash
 npm install -g oh-my-snow
 oms setup
-oms doctor   # optional post-install health check
+oms doctor   # recommended post-install health check
 ```
 
-The `oms setup` command:
+Equivalent package entry: `oh-my-snow` (same CLI as `oms`).
+
+### Prerequisites
+
+- **Node.js** ≥ 18
+- **npm** (for global install)
+- **Snow CLI** installed and configured
+
+### What `oms setup` does
 
 1. Registers the MCP server in `~/.snow/settings.json`
 2. Merges 18 sub-agents into `~/.snow/sub-agents.json`
@@ -34,9 +54,31 @@ The `oms setup` command:
 5. Installs 4 hook configs to `~/.snow/hooks/` (global, with absolute path commands pointing to the npm package)
 6. Creates `<project>/.snow/oms-state/` for session state (auto-created per project at runtime)
 
+### CLI reference
+
+| Command | Description |
+| --- | --- |
+| `oms setup` | Install / re-install OMS into Snow CLI (MCP, agents, skills, commands, hooks) |
+| `oms doctor` | Post-install health check (MCP path, hooks timeout/path, agents, skills, commands) |
+| `oms version` | Print package version (`-v` / `--version`) |
+| `oms uninstall` | Remove OMS components from Snow CLI |
+| `oms help` | Show installer help (`-h` / `--help`) |
+
 > **Note**: `oms setup` can be run from any directory — all components are installed globally. The `.snow/oms-state/` directory is auto-created in each project at runtime when an OMS session starts.
 
 > **Note**: Hook commands use absolute paths to the npm package's `hooks/` directory (e.g., `node "/usr/local/lib/node_modules/oh-my-snow/hooks/before-tool-call.mjs"`), which is cross-platform compatible.
+
+### From source (development)
+
+```bash
+git clone https://github.com/yy1588133/oh-my-snow.git
+cd oh-my-snow
+npm install
+npm run build
+npm test
+npm link          # exposes local oms on PATH
+oms setup
+```
 
 ## Quick Start
 
@@ -91,11 +133,39 @@ planning → executing → verifying → done
 
 > **Note**: There is no `fixing` stage. When verification fails, the state transitions back to `executing` so the AI can fix issues and re-verify. A `done`-stage build failure also force-transitions to `executing`.
 
+### Completion gates (new sessions)
+
+New orchestration sessions start with `gatesRequired: true`. Stage transitions at two choke points require **ledger-backed scorecards**, not a verbal claim of “done”.
+
+```
+executing ──[task-complete]──► verifying ──[task-reconcile → code-quality → completion]──► done
+                  │                         │
+                  └─ missing scorecard ─────┴─ missing / rejected gate → stay or bounce to executing
+```
+
+| Gate | When | How to pass |
+| --- | --- | --- |
+| **task-complete** | Before `executing → verifying` | `oms-prd action:"submit-gate" scope:"task-complete"` with JSON scorecard (`pass`, `summary`, `evidence[]`). Incomplete tasks need `deferred[{id,reason}]`. Empty tasks need `noTasksReason` **or** a refined PRD with all stories `passes:true`. |
+| **task-reconcile** | Inside `verifying` (first) | `submit-gate` scope `task-reconcile` — tasks/goal alignment. |
+| **code-quality** | After reconcile | `request-verification` scope `code-quality`, then `submit-approval` with **allowlisted** reviewer (`oms_reviewer` / `oms_critic` / `oms_architect`) **and** a scorecard that includes evidence / `diffStat`. Self ids like `main` are rejected. |
+| **completion** | Before `verifying → done` | Same as code-quality with scope `completion` and an independent `#oms_critic`-style review. |
+
+**Observability:** `oms-get-state` prints `gatesRequired`, **Gate ledger**, and **Last gate failure**.
+
+**Integrity:**
+
+- Ledger file: `.snow/oms-state/verification-ledger.json` (per-scope approvals; re-request clears **only** that scope).
+- Hooks block writing under `.snow/oms-state/` via filesystem tools **and** shell redirects that target the ledger/state dir.
+- Returning to `executing` from `verifying`/`done` invalidates `code-quality` + `completion` so code changes must be re-reviewed.
+- **L1 residual:** a client can still *claim* `reviewerAgentId: "oms_critic"` without spawning a real sub-agent. Gates block empty oral done; true process isolation is a future L2 host capability.
+
+Legacy sessions without `gatesRequired` keep the older completion-approval exemption behavior for compatibility.
+
 ## Commands
 
 | Command                   | Description                                                                                    |
 | ------------------------- | ---------------------------------------------------------------------------------------------- |
-| `/oms:auto <goal>`        | Start autonomous orchestration — plan, execute, verify, done (verify fail → back to executing) |
+| `/oms:auto <goal>`        | Start autonomous orchestration with completion gates (plan → execute → gated verify → done) |
 | `/oms:team <N> <goal>`    | Multi-agent orchestration — N teammates in isolated git worktrees, lead orchestrates           |
 | `/oms:plan <goal>`        | Iterative planning with consensus — analyze, create tasks, discuss with user                   |
 | `/oms:qa <context>`       | QA loop — diagnose issues, fix them, run build/test until clean                                |
@@ -128,16 +198,25 @@ Each maps to a skill via the `skill-execute` tool — equivalent to `/skill oms/
 | Tool                | Description                                                                                          |
 | ------------------- | ---------------------------------------------------------------------------------------------------- |
 | `oms-start`         | Initialize an orchestration session with a goal                                                      |
-| `oms-get-state`     | Get current state (stage, tasks, turn count, logs)                                                   |
-| `oms-set-stage`     | Transition to a new stage (planning → executing → verifying → done; verify fail → back to executing) |
+| `oms-get-state`     | Get current state (stage, tasks, turn count, logs, **gate ledger**, last gate failure)               |
+| `oms-set-stage`     | Transition stages; **gatesRequired** sessions enforce task-complete before verifying and multi-gate before done |
 | `oms-set-team`      | Record the active snow-cli team name (for /oms:team multi-agent mode)                                |
 | `oms-add-task`      | Add a task during the planning phase                                                                 |
 | `oms-complete-task` | Mark a task as completed                                                                             |
 | `oms-snapshot`      | Save, restore, or list execution snapshots                                                           |
 | `oms-learn`         | Extract reusable patterns and orchestrate skill evolution cycle                                      |
-| `oms-prd`           | Ralph PRD management — init/refine/story/criteria/progress                                           |
+| `oms-prd`           | Ralph PRD + **gates**: `submit-gate`, `request-verification`, `submit-approval` (scorecard required for code-quality/completion) |
 | `oms-state`         | Generic key-value state store for skills (mirrors omc state_write/state_read; `.snow/oms-state/store/<mode>.json`) |
 | `oms-stop`          | End the orchestration session and clean up state                                                     |
+
+#### Gate-related `oms-prd` actions
+
+| Action | Purpose |
+| --- | --- |
+| `submit-gate` | Self-gates only: `task-complete` or `task-reconcile` + JSON `scorecard` |
+| `request-verification` | Start a token for `story`, `code-quality`, or `completion` (not self-gates) |
+| `submit-approval` | Resolve a token; for `code-quality`/`completion` requires allowlisted `reviewerAgentId` + `scorecard` |
+| `get-pending-verification` | Inspect current pending verification token |
 
 ## Skills
 
@@ -273,6 +352,8 @@ Tool names and collaboration references are adapted to snow-cli: `Glob/Grep/Read
 
 ```bash
 oms uninstall
+# optional: also remove the global package
+npm uninstall -g oh-my-snow
 ```
 
 This command:
@@ -281,8 +362,30 @@ This command:
 2. Removes all `oms_*` agents from `~/.snow/sub-agents.json`
 3. Removes `~/.snow/skills/oms/` directory
 4. Removes `~/.snow/commands/oms/` directory
-5. Removes OMS hook rules from `<project>/.snow/hooks/*.json`
-6. Removes `<project>/.snow/oms-state/` directory
+5. Removes OMS hook rules from `~/.snow/hooks/*.json` (global)
+6. Removes `<project>/.snow/oms-state/` directory (when run from a project that has one)
+
+## Development
+
+```bash
+npm install
+npm run build      # tsc → dist/
+npm test           # full regression suite
+npm run pack:check # dry-run npm pack contents
+```
+
+| Script | Purpose |
+| --- | --- |
+| `npm run build` | Compile TypeScript to `dist/` |
+| `npm run dev` | `tsc --watch` |
+| `npm test` | Run all `test/*.mjs` suites |
+| `npm start` | Start MCP server (`dist/mcp-server.js`) |
+| `npm run clean:pack-noise` | Strip local `.omc/` noise under `assets/` before packing |
+| `npm run prepack` / `prepublishOnly` | Clean + build (+ test on publish) |
+
+CI: GitHub Actions workflow at [`.github/workflows/ci.yml`](./.github/workflows/ci.yml) (build + test).
+
+Published package includes: `dist/`, `assets/`, `hooks/`, `README.md`, `LICENSE` (see `package.json` `files`).
 
 ## Project Structure
 
@@ -290,7 +393,8 @@ This command:
 oh-my-snow/
 ├── src/
 │   ├── mcp-server.ts          # MCP server with 11 tools (incl. oms-state skill state store)
-│   ├── installer.ts           # CLI entry point (oms setup/uninstall/help)
+│   ├── installer.ts           # CLI: setup / uninstall / doctor / version / help
+│   ├── i18n/                  # Installer translations (en, zh, zh-TW)
 │   └── state/
 │       └── store.ts           # State management (JSON file persistence)
 ├── hooks/
@@ -313,28 +417,30 @@ oh-my-snow/
 │   │       ├── wiki/SKILL.md
 │   │       ├── research/SKILL.md
 │   │       ├── learn/SKILL.md
+│   │       ├── plan/SKILL.md
 │   │       └── ralph/SKILL.md
 │   ├── commands/
-│   │   └── oms/
-│   │       ├── auto.json
-│   │       ├── team.json
-│   │       ├── plan.json
-│   │       ├── qa.json
-│   │       ├── goal.json
-│   │       ├── verify.json
-│   │       ├── release.json
-│   │       ├── save.json
-│   │       ├── stop.json
-│   │       └── help.json
+│   │   └── oms/               # 18 command JSON files (workflow + skill mappings)
 │   └── hooks/
 │       ├── beforeToolCall.json
 │       ├── afterToolCall.json
 │       ├── onStop.json
 │       └── onUserMessage.json
+├── scripts/
+│   ├── clean-pack-noise.mjs   # Remove assets/**/.omc before npm pack
+│   └── gen-sub-agents.mjs
+├── test/                      # Node test suites (npm test)
+├── .github/workflows/ci.yml
 ├── package.json
 └── tsconfig.json
 ```
 
+## Links
+
+- npm: https://www.npmjs.com/package/oh-my-snow
+- Source: https://github.com/yy1588133/oh-my-snow
+- Issues: https://github.com/yy1588133/oh-my-snow/issues
+
 ## License
 
-MIT
+[MIT](./LICENSE)
