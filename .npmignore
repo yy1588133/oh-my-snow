@@ -1,0 +1,5 @@
+# Defense-in-depth: strip local agent runtime state under assets/
+# even if prepack cleanup is skipped. Prefer clean:pack-noise + delete.
+**/.omc/**
+**/.omc/
+*.tgz

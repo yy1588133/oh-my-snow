@@ -29,3 +29,6 @@ Thumbs.db
 
 # Logs
 *.log
+
+# npm pack artifacts
+*.tgz

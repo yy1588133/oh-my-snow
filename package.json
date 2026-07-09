@@ -5,20 +5,25 @@
   "type": "module",
   "main": "dist/mcp-server.js",
   "bin": {
-    "oms": "dist/installer.js"
+    "oms": "dist/installer.js",
+    "oh-my-snow": "dist/installer.js"
   },
   "files": [
     "dist",
     "assets",
     "hooks",
-    "README.md"
+    "README.md",
+    "LICENSE"
   ],
   "scripts": {
     "build": "tsc",
     "dev": "tsc --watch",
     "start": "node dist/mcp-server.js",
     "test": "node test/test-hooks.mjs && node test/test-v2-hooks.mjs && node test/test-mcp.mjs && node test/test-skill-evolution.mjs && node test/test-review-fixes.mjs && node test/test-prd-fixes.mjs && node test/test-iteration-limits.mjs && node test/test-state-expire.mjs && node test/test-prd-verification.mjs && node test/test-completion-gate.mjs && node test/test-oms-state.mjs && node test/test-installer.mjs && node test/test-direct-invocation.mjs && node test/test-verify-hardening.mjs && node test/test-maturity-contracts.mjs && node test/test-doctor.mjs",
-    "prepublishOnly": "npm run build && npm test"
+    "clean:pack-noise": "node scripts/clean-pack-noise.mjs",
+    "prepack": "npm run clean:pack-noise && npm run build",
+    "prepublishOnly": "npm run clean:pack-noise && npm run build && npm test",
+    "pack:check": "npm pack --dry-run"
   },
   "keywords": [
     "snow-cli",
@@ -31,6 +36,9 @@
   "license": "MIT",
   "engines": {
     "node": ">=18"
+  },
+  "publishConfig": {
+    "access": "public"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.12.1",
