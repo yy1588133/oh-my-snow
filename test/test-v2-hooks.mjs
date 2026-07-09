@@ -137,7 +137,7 @@ assert('beforeToolCall: planning blocks terminal-execute', r9b.exitCode === 1, `
 assert('beforeToolCall: planning terminal message', r9b.stderr.includes('PLANNING'), r9b.stderr.slice(0, 200));
 writeState({ ...baseState, stage: 'verifying' });
 const r9c = runHook('hooks/before-tool-call.mjs', terminalContext);
-assert('beforeToolCall: verifying blocks terminal-execute', r9c.exitCode === 1, `got ${r9c.exitCode}`);
+assert('beforeToolCall: verifying allows terminal-execute', r9c.exitCode === 0, `got ${r9c.exitCode}`);
 
 // Test 10: no state = fail-open
 rmSync(stateDir, { recursive: true, force: true });

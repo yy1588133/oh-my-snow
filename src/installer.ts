@@ -344,8 +344,15 @@ function setupSkills(packageDir: string): void {
 		try {
 			renameSync(SKILLS_TARGET, bak);
 			console.log(c.yellow(`  ⚠ Existing skills backed up to ${bak}`));
-		} catch {
-			rmSync(SKILLS_TARGET, {recursive: true, force: true});
+		} catch (error) {
+			// Never silent-wipe user skills if backup failed (review SEC-02/R2).
+			console.error(
+				c.red(
+					`  ✖ Cannot backup existing skills (${(error as Error).message}). ` +
+						`Refusing to overwrite ${SKILLS_TARGET}. Move/delete it manually, then retry.`,
+				),
+			);
+			return;
 		}
 	}
 
@@ -385,8 +392,14 @@ function setupCommands(packageDir: string): void {
 		try {
 			renameSync(COMMANDS_TARGET, bak);
 			console.log(c.yellow(`  ⚠ Existing commands backed up to ${bak}`));
-		} catch {
-			rmSync(COMMANDS_TARGET, {recursive: true, force: true});
+		} catch (error) {
+			console.error(
+				c.red(
+					`  ✖ Cannot backup existing commands (${(error as Error).message}). ` +
+						`Refusing to overwrite ${COMMANDS_TARGET}. Move/delete it manually, then retry.`,
+				),
+			);
+			return;
 		}
 	}
 
@@ -917,62 +930,66 @@ function doctor(): void {
 	}
 	checks.push({ok: commandsOk, label: 'commands', detail: commandsDetail});
 
-	// onStop timeout >= 330000
+	// onStop timeout must come from INSTALLED hooks only (not package assets)
 	const onStopInstalled = join(GLOBAL_HOOKS_DIR, 'onStop.json');
-	const onStopAsset =
-		packageDir !== null
-			? join(packageDir, 'assets', 'hooks', 'onStop.json')
-			: null;
-	const timeoutPath = existsSync(onStopInstalled)
-		? onStopInstalled
-		: onStopAsset && existsSync(onStopAsset)
-			? onStopAsset
-			: null;
-	const timeout = timeoutPath ? readOnStopTimeout(timeoutPath) : null;
-	const timeoutOk = timeout !== null && timeout >= 330000;
+	const installedTimeout = existsSync(onStopInstalled)
+		? readOnStopTimeout(onStopInstalled)
+		: null;
+	const timeoutOk =
+		installedTimeout !== null && installedTimeout >= 330000;
 	checks.push({
 		ok: timeoutOk,
 		label: 'onStop.timeout',
 		detail:
-			timeout === null
-				? 'onStop.json not found or timeout missing — run oms setup'
-				: `timeout=${timeout}ms (need >= 330000; verify is 300000 + buffer)`,
+			installedTimeout === null
+				? `installed onStop.json missing under ${GLOBAL_HOOKS_DIR} — run oms setup`
+				: `installed timeout=${installedTimeout}ms (need >= 330000; verify is 300000 + buffer)`,
 	});
 
-	// Hook script paths exist (if installed)
-	let hooksPathOk = true;
-	let hooksPathDetail = 'hook configs not installed';
+	// Hook configs must be installed under ~/.snow/hooks (not package assets only)
+	let hooksPathOk = false;
+	let hooksPathDetail = `hook configs not installed at ${GLOBAL_HOOKS_DIR} — run oms setup`;
 	if (existsSync(GLOBAL_HOOKS_DIR)) {
-		const hookFiles = readdirSync(GLOBAL_HOOKS_DIR).filter(f =>
-			f.endsWith('.json'),
+		const required = [
+			'beforeToolCall.json',
+			'afterToolCall.json',
+			'onStop.json',
+			'onUserMessage.json',
+		];
+		const missingFiles = required.filter(
+			f => !existsSync(join(GLOBAL_HOOKS_DIR, f)),
 		);
-		const missing: string[] = [];
-		for (const f of hookFiles) {
-			try {
-				const rules = JSON.parse(
-					readFileSync(join(GLOBAL_HOOKS_DIR, f), 'utf-8'),
-				) as {hooks?: {command?: string}[]}[];
-				if (!Array.isArray(rules)) continue;
-				for (const rule of rules) {
-					const hooks = rule.hooks;
-					if (!Array.isArray(hooks)) continue;
-					for (const h of hooks) {
-						const cmd = h.command ?? '';
-						const m = cmd.match(/node\s+"?([^"]+\.mjs)"?/);
-						if (m && !existsSync(m[1].replace(/^"|"$/g, ''))) {
-							missing.push(m[1]);
+		const missingScripts: string[] = [];
+		if (missingFiles.length === 0) {
+			for (const f of required) {
+				try {
+					const rules = JSON.parse(
+						readFileSync(join(GLOBAL_HOOKS_DIR, f), 'utf-8'),
+					) as {hooks?: {command?: string}[]}[];
+					if (!Array.isArray(rules)) continue;
+					for (const rule of rules) {
+						const hooks = rule.hooks;
+						if (!Array.isArray(hooks)) continue;
+						for (const h of hooks) {
+							const cmd = h.command ?? '';
+							const m = cmd.match(/node\s+"?([^"]+\.mjs)"?/);
+							if (m && !existsSync(m[1].replace(/^"|"$/g, ''))) {
+								missingScripts.push(m[1]);
+							}
 						}
 					}
+				} catch {
+					// skip unreadable
 				}
-			} catch {
-				// skip unreadable
 			}
 		}
-		hooksPathOk = missing.length === 0;
+		hooksPathOk = missingFiles.length === 0 && missingScripts.length === 0;
 		hooksPathDetail =
-			missing.length === 0
-				? `${hookFiles.length} hook configs; script paths OK`
-				: `missing hook scripts: ${missing.slice(0, 3).join(', ')}`;
+			missingFiles.length > 0
+				? `missing hook files: ${missingFiles.join(', ')} — run oms setup`
+				: missingScripts.length > 0
+					? `missing hook scripts: ${missingScripts.slice(0, 3).join(', ')}`
+					: `${required.length} hook configs; script paths OK`;
 	}
 	checks.push({ok: hooksPathOk, label: 'hook-paths', detail: hooksPathDetail});
 

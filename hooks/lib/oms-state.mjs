@@ -157,19 +157,28 @@ export function inspectStateFile() {
 	} catch {
 		return 'corrupt';
 	}
-	const STALE_STATE_MS = 2 * 60 * 60 * 1000;
-	const t1 = state.updatedAt ? new Date(state.updatedAt).getTime() : 0;
-	let prd = null;
-	try { prd = loadPrd(); } catch {}
-	const t2 = prd && prd.updatedAt ? new Date(prd.updatedAt).getTime() : 0;
-	const hist = Array.isArray(state.stageHistory) ? state.stageHistory : [];
-	const lastHist = hist.length ? hist[hist.length - 1] : null;
-	const t3 = lastHist && lastHist.timestamp ? new Date(lastHist.timestamp).getTime() : 0;
-	const latestActivity = Math.max(t1, t2, t3);
-	if (latestActivity > 0 && Date.now() - latestActivity > STALE_STATE_MS) {
-		return 'expired';
+	// Non-object JSON (null, array, number, string) is corrupt — must not throw
+	// and must not fall through to fail-open write gates (maturity review R1).
+	if (state === null || typeof state !== 'object' || Array.isArray(state)) {
+		return 'corrupt';
 	}
-	return 'ok';
+	try {
+		const STALE_STATE_MS = 2 * 60 * 60 * 1000;
+		const t1 = state.updatedAt ? new Date(state.updatedAt).getTime() : 0;
+		let prd = null;
+		try { prd = loadPrd(); } catch {}
+		const t2 = prd && prd.updatedAt ? new Date(prd.updatedAt).getTime() : 0;
+		const hist = Array.isArray(state.stageHistory) ? state.stageHistory : [];
+		const lastHist = hist.length ? hist[hist.length - 1] : null;
+		const t3 = lastHist && lastHist.timestamp ? new Date(lastHist.timestamp).getTime() : 0;
+		const latestActivity = Math.max(t1, t2, t3);
+		if (latestActivity > 0 && Date.now() - latestActivity > STALE_STATE_MS) {
+			return 'expired';
+		}
+		return 'ok';
+	} catch {
+		return 'corrupt';
+	}
 }
 
 /**

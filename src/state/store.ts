@@ -138,11 +138,11 @@ function getVerifyCommandFilePath(): string {
  * silently on every turn. This validation prevents that.
  *
  * Allowed: alphanumerics, spaces, path separators, common flags, quotes,
- * and the three safe chaining operators (&& || |) which are legitimate for
- * multi-step build/test commands (e.g. "npm run build && npm test").
+ * && (multi-step e.g. "npm run build && npm test"), and bare | (pipe UX).
  *
- * Blocked: command separators (; &), command substitution ($() ``), newlines,
- * and background execution (&). These enable stealthy command injection.
+ * Blocked: command separators (;), || (silent-green e.g. "npm test || true"),
+ * command substitution ($() ``), redirects (<>), newlines/CR, and background
+ * execution (&). These enable stealthy command injection or forgeable verify.
  *
  * The single-& check strips all && first, then looks for a residual &.
  * This avoids the word-boundary (\b) trap: & is not a word character, so

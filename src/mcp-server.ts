@@ -56,7 +56,7 @@ import {
 	listOmsModes,
 	type RefinedStoryInput,
 } from './state/store.js';
-import {writeFileSync, mkdirSync} from 'fs';
+import {writeFileSync, mkdirSync, existsSync} from 'fs';
 import {join} from 'path';
 import {homedir} from 'os';
 
@@ -1988,7 +1988,39 @@ server.registerTool(
 	() => {
 		try {
 			const state = loadState();
+			const statePath = join(process.cwd(), '.snow', 'oms-state', 'state.json');
+			// loadState returns null for absent, expired, AND corrupt. Expired/corrupt
+			// still leave files on disk — U8 hooks tell agents to oms-stop, so we must
+			// still delete residual state when the file exists.
 			if (!state) {
+				if (existsSync(statePath)) {
+					const cleaned = deleteState();
+					deletePrd();
+					if (!cleaned) {
+						return {
+							content: [
+								{
+									type: 'text' as const,
+									text:
+										`⚠️ OMS session was expired/corrupt and cleanup is incomplete.\n\n` +
+										`state.json and/or verify.cmd may still exist under .snow/oms-state/.\n` +
+										`Delete them manually, then oms-start.`,
+								},
+							],
+							isError: true,
+						};
+					}
+					return {
+						content: [
+							{
+								type: 'text' as const,
+								text:
+									`✅ OMS session cleaned up (was expired or corrupt — no live session).\n` +
+									`You can oms-start a new session.`,
+							},
+						],
+					};
+				}
 				return {
 					content: [
 						{

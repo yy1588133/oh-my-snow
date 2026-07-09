@@ -29,7 +29,8 @@ const FILE_WRITE_TOOLS = new Set([
 	'filesystem-replaceedit',
 ]);
 
-// Tools that execute terminal commands — blocked in 'done' stage
+// Tools that execute terminal commands — blocked in planning/done.
+// verifying ALLOWS terminal so /oms:verify can run git/test (filesystem writes stay blocked).
 const TERMINAL_TOOLS = new Set([
 	'terminal-execute',
 ]);
@@ -87,8 +88,9 @@ function checkStageEnforcement(stage, toolName) {
 		}
 	}
 
-	// Terminal tools — blocked outside executing (shell can write files and
-	// would otherwise bypass the filesystem stage gate).
+	// Terminal tools — blocked in planning/done (shell can write files).
+	// verifying allows terminal for git/test review (/oms:verify contract);
+	// filesystem writes remain blocked in verifying.
 	if (TERMINAL_TOOLS.has(toolName)) {
 		switch (stage) {
 			case 'planning':
@@ -102,17 +104,6 @@ function checkStageEnforcement(stage, toolName) {
 						`  Call oms-set-stage { stage: "executing" }\n` +
 						`Then terminal-execute is allowed.`,
 				};
-			case 'verifying':
-				return {
-					allowed: false,
-					reason:
-						`[OMS:BLOCKED] You are in the VERIFYING stage — terminal-execute is not allowed.\n` +
-						`Review with read-only tools. Auto-verification runs via onStop.\n\n` +
-						`If you need to fix issues:\n` +
-						`  Call oms-set-stage { stage: "executing" }\n` +
-						`If everything passes:\n` +
-						`  Call oms-set-stage { stage: "done" }`,
-				};
 			case 'done':
 				return {
 					allowed: false,
@@ -120,7 +111,7 @@ function checkStageEnforcement(stage, toolName) {
 						`[OMS:BLOCKED] The orchestration session is DONE — no further commands allowed.\n\n` +
 						`If you need to do more work, start a new session with oms-start.`,
 				};
-			// executing allows terminal
+			// executing + verifying allow terminal
 			default:
 				return { allowed: true, reason: '' };
 		}
