@@ -19,7 +19,7 @@
     "build": "tsc",
     "dev": "tsc --watch",
     "start": "node dist/mcp-server.js",
-    "test": "node test/test-hooks.mjs && node test/test-v2-hooks.mjs && node test/test-mcp.mjs && node test/test-skill-evolution.mjs && node test/test-review-fixes.mjs && node test/test-prd-fixes.mjs && node test/test-iteration-limits.mjs && node test/test-state-expire.mjs && node test/test-prd-verification.mjs && node test/test-completion-gate.mjs && node test/test-oms-state.mjs && node test/test-installer.mjs && node test/test-direct-invocation.mjs && node test/test-verify-hardening.mjs && node test/test-maturity-contracts.mjs && node test/test-doctor.mjs",
+    "test": "node test/test-hooks.mjs && node test/test-v2-hooks.mjs && node test/test-mcp.mjs && node test/test-skill-evolution.mjs && node test/test-review-fixes.mjs && node test/test-prd-fixes.mjs && node test/test-iteration-limits.mjs && node test/test-state-expire.mjs && node test/test-prd-verification.mjs && node test/test-completion-gate.mjs && node test/test-gate-scorecards.mjs && node test/test-oms-state.mjs && node test/test-installer.mjs && node test/test-direct-invocation.mjs && node test/test-verify-hardening.mjs && node test/test-maturity-contracts.mjs && node test/test-doctor.mjs",
     "clean:pack-noise": "node scripts/clean-pack-noise.mjs",
     "prepack": "npm run clean:pack-noise && npm run build",
     "prepublishOnly": "npm run clean:pack-noise && npm run build && npm test",
@@ -34,6 +34,14 @@
     "plugin"
   ],
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/yy1588133/oh-my-snow.git"
+  },
+  "bugs": {
+    "url": "https://github.com/yy1588133/oh-my-snow/issues"
+  },
+  "homepage": "https://github.com/yy1588133/oh-my-snow#readme",
   "engines": {
     "node": ">=18"
   },

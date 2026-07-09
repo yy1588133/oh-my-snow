@@ -23,6 +23,26 @@ import {
 } from 'fs';
 import {join, dirname, basename} from 'path';
 import {randomUUID} from 'crypto';
+import {
+	initGatesRuntime,
+	getLedgerApproval,
+	recordLedgerApproval,
+	deleteLedger,
+	invalidatePostDoneGates,
+	parseScorecard,
+	assertApprovingScorecard,
+	validateTaskCompleteScorecard,
+	approveSelfGate,
+	canEnterVerifying,
+	canEnterDone,
+	formatLedgerSummary,
+	isAllowlistedStrictReviewer,
+	requiresStrictReviewer,
+	isSelfReviewerId,
+	clearLedgerApproval,
+	type GateScope,
+	type GateScorecard,
+} from './gates.js';
 
 // ── Types ──
 
@@ -90,6 +110,19 @@ export interface OmsState {
 	 * Set to 0 for unlimited (omc default behavior) — not recommended.
 	 */
 	hardMaxIterations: number;
+	/**
+	 * When true, stage gates require ledger approvals (no "missing verification
+	 * file = allow" exemption). New sessions default true; legacy states omit
+	 * the field and keep the transitional exemption.
+	 */
+	gatesRequired?: boolean;
+	/** Last gate failure for agent/user observability (reject or blocked transition). */
+	lastGateFailure?: {
+		scope: string;
+		summary: string;
+		reasons: string[];
+		at: string;
+	} | null;
 }
 
 // ── Constants ──
@@ -642,6 +675,9 @@ export function createState(goal: string, verifyCommand: string): OmsState {
 		// hooks/on-stop.mjs MAX_TURNS replacement logic.
 		maxIterations: 50,
 		hardMaxIterations: 200,
+		// Completion-gates plan: new sessions always enforce multi-gate ledger.
+		gatesRequired: true,
+		lastGateFailure: null,
 	};
 	saveState(state);
 	return state;
@@ -933,6 +969,13 @@ function getProgressFilePath(): string {
 function atomicWriteFile(filePath: string, content: string): void {
 	atomicWriteWithLock(filePath, content, 'force');
 }
+
+// Wire gate ledger I/O once atomic writer exists (function decl is hoisted).
+initGatesRuntime({
+	getStateDir,
+	atomicWriteFile,
+	cleanupTmpFiles,
+});
 
 /**
  * Load the PRD. Returns null if no PRD file exists.
@@ -1563,8 +1606,13 @@ export function deletePrd(): void {
 // 过渡期豁免 (R1): verification-state.json 不存在时 gate 不触发, 老会话原行为.
 // forceSetStage 豁免 completion gate (AC1.11a): build 失败 done→executing 回退不被拦.
 
-/** Verification scope — story-level vs whole-completion. */
-export type VerificationScope = 'story' | 'completion';
+/** Verification / gate scope (extended for completion-gates plan). */
+export type VerificationScope =
+	| 'story'
+	| 'completion'
+	| 'task-complete'
+	| 'task-reconcile'
+	| 'code-quality';
 
 /** Verification status lifecycle. */
 export type VerificationStatus = 'pending' | 'approved' | 'rejected';
@@ -1682,7 +1730,16 @@ function isVerificationExpired(v: VerificationState): boolean {
  */
 export type SubmitApprovalResult =
 	| {ok: true; verification: VerificationState}
-	| {ok: false; reason: 'mismatch' | 'used' | 'expired' | 'max-attempts' | 'missing'};
+	| {
+			ok: false;
+			reason:
+				| 'mismatch'
+				| 'used'
+				| 'expired'
+				| 'max-attempts'
+				| 'missing'
+				| 'forbidden';
+	  };
 
 /**
  * Request a new verification. Generates a UUID token and writes a pending record.
@@ -1805,8 +1862,38 @@ export function submitApproval(
 		// Don't set status='rejected' here — keep pending so reviewer can retry.
 		// The next submit's max-attempts gate is what finally locks it.
 		saveVerificationState(v);
+		// Atomic bounce to executing for gate scopes when session is verifying.
+		const st = loadState();
+		if (
+			st &&
+			(st.stage === 'verifying' || st.stage === 'done') &&
+			v.scope !== 'story'
+		) {
+			clearLedgerApproval(v.scope as GateScope, v.storyId);
+			st.lastGateFailure = {
+				scope: v.scope,
+				summary: feedback || 'gate rejected',
+				reasons: [feedback || 'rejected'],
+				at: new Date().toISOString(),
+			};
+			// Bypass setStage transition validation for reject bounce.
+			st.stage = 'executing';
+			st.stageHistory.push({
+				stage: 'executing',
+				timestamp: new Date().toISOString(),
+			});
+			st.updatedAt = new Date().toISOString();
+			saveState(st);
+		}
 		return {ok: true, verification: v};
 	}
+	// Strict scopes: block self-approval identities (L1).
+	if (requiresStrictReviewer(v.scope as GateScope)) {
+		if (!isAllowlistedStrictReviewer(reviewerAgentId)) {
+			return {ok: false, reason: 'forbidden'};
+		}
+	}
+
 	// Approved: resolve the verification.
 	v.status = 'approved';
 	v.resolvedAt = now;
@@ -1814,6 +1901,16 @@ export function submitApproval(
 	v.criticTier = criticTier;
 	v.reviewerAgentId = reviewerAgentId;
 	saveVerificationState(v);
+	// Mirror into multi-gate ledger (does not wipe other scopes).
+	recordLedgerApproval({
+		scope: v.scope as GateScope,
+		storyId: v.storyId,
+		requestId: v.requestId,
+		scorecard: null,
+		reviewerAgentId,
+		reviewerFeedback: feedback,
+		requestedAt: v.requestedAt,
+	});
 	return {ok: true, verification: v};
 }
 
@@ -1844,6 +1941,14 @@ export function hasMatchingApproval(
 	storyId: string | null,
 	scope: VerificationScope = 'story',
 ): boolean {
+	const state = loadState();
+	const gatesRequired = state?.gatesRequired === true;
+
+	// New sessions: ledger is source of truth; missing file never means "allow".
+	if (gatesRequired) {
+		return getLedgerApproval(scope, storyId) != null;
+	}
+
 	const filePath = getVerificationFilePath();
 	const fileExists = existsSync(filePath);
 	const v = loadVerificationState();
@@ -1872,7 +1977,7 @@ export function hasMatchingApproval(
 			return false;
 		}
 	} else {
-		// completion scope: storyId should be null on both sides.
+		// non-story scopes (completion / gates): storyId should be null on both sides.
 		if (storyId !== null || v.storyId !== null) {
 			return false;
 		}
@@ -1924,6 +2029,46 @@ export function deleteVerificationState(): void {
 		} catch {}
 	}
 	cleanupTmpFiles(filePath);
+	deleteLedger();
+}
+
+// ── Gate helpers re-exported for MCP ──
+
+export {
+	parseScorecard,
+	assertApprovingScorecard,
+	validateTaskCompleteScorecard,
+	approveSelfGate,
+	canEnterVerifying,
+	canEnterDone,
+	formatLedgerSummary,
+	getLedgerApproval,
+	invalidatePostDoneGates,
+	isAllowlistedStrictReviewer,
+	requiresStrictReviewer,
+	isSelfReviewerId,
+	type GateScope,
+	type GateScorecard,
+};
+
+/**
+ * Record last gate failure on active state (blocked transition).
+ */
+export function setLastGateFailure(
+	scope: string,
+	summary: string,
+	reasons: string[],
+): void {
+	const st = loadState();
+	if (!st) return;
+	st.lastGateFailure = {
+		scope,
+		summary,
+		reasons,
+		at: new Date().toISOString(),
+	};
+	st.updatedAt = new Date().toISOString();
+	saveState(st);
 }
 
 // ── Generic OMS state store (对标 omc state_write/state_read) ──

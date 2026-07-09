@@ -208,7 +208,12 @@ Goal: ${goal}
 ${diffSection}
 Review the changes above.
 - If issues are found, call oms-set-stage { stage: "executing" } to fix them
-- If everything passes, call oms-set-stage { stage: "done" }`;
+- If everything looks good, complete gates before done:
+  1) oms-prd submit-gate task-reconcile
+  2) request-verification code-quality + independent #oms_reviewer approval
+  3) request-verification completion + independent #oms_critic approval
+  4) oms-set-stage { stage: "done" }
+- Oral "done" without ledger approvals is blocked. Check oms-get-state for Gate ledger / Last gate failure.`;
 		}
 
 		case 'done':

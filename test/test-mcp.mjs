@@ -115,26 +115,93 @@ async function runTests() {
 	const r8 = await waitForResponse(10);
 	assert('oms-snapshot list shows checkpoint1', r8?.result?.content?.[0]?.text?.includes('checkpoint1'), JSON.stringify(r8).slice(0, 200));
 
+	// Complete remaining task + task-complete gate before verifying
+	send('tools/call', { name: 'oms-complete-task', arguments: { taskId: 'task_2' } });
+	await waitForResponse(11);
+	send('tools/call', {
+		name: 'oms-prd',
+		arguments: {
+			action: 'submit-gate',
+			scope: 'task-complete',
+			scorecard: JSON.stringify({
+				pass: true,
+				summary: 'all tasks done',
+				evidence: ['task_1', 'task_2'],
+			}),
+		},
+	});
+	const rGate1 = await waitForResponse(12);
+	assert('submit-gate task-complete', rGate1?.result?.isError !== true, JSON.stringify(rGate1).slice(0, 200));
+
 	// Tool: oms-set-stage (executing → verifying)
 	send('tools/call', { name: 'oms-set-stage', arguments: { stage: 'verifying' } });
-	const r9 = await waitForResponse(11);
+	const r9 = await waitForResponse(13);
 	assert('oms-set-stage executing→verifying', r9?.result?.content?.[0]?.text?.includes('verifying'), JSON.stringify(r9).slice(0, 200));
+
+	// Dual gates + completion before done
+	send('tools/call', {
+		name: 'oms-prd',
+		arguments: {
+			action: 'submit-gate',
+			scope: 'task-reconcile',
+			scorecard: JSON.stringify({
+				pass: true,
+				summary: 'tasks match goal',
+				evidence: ['reviewed tasks'],
+			}),
+		},
+	});
+	await waitForResponse(14);
+	send('tools/call', {
+		name: 'oms-prd',
+		arguments: { action: 'request-verification', scope: 'code-quality' },
+	});
+	const rCq = await waitForResponse(15);
+	const cqId = (rCq?.result?.content?.[0]?.text ?? '').match(/requestId: ([a-f0-9-]+)/)?.[1];
+	send('tools/call', {
+		name: 'oms-prd',
+		arguments: {
+			action: 'submit-approval',
+			requestId: cqId,
+			verdict: 'approved',
+			feedback: 'quality ok',
+			reviewerAgentId: 'oms_reviewer',
+		},
+	});
+	await waitForResponse(16);
+	send('tools/call', {
+		name: 'oms-prd',
+		arguments: { action: 'request-verification', scope: 'completion' },
+	});
+	const rComp = await waitForResponse(17);
+	const compId = (rComp?.result?.content?.[0]?.text ?? '').match(/requestId: ([a-f0-9-]+)/)?.[1];
+	send('tools/call', {
+		name: 'oms-prd',
+		arguments: {
+			action: 'submit-approval',
+			requestId: compId,
+			verdict: 'approved',
+			feedback: 'session complete',
+			reviewerAgentId: 'oms_critic',
+		},
+	});
+	await waitForResponse(18);
 
 	// Tool: oms-set-stage (verifying → done)
 	send('tools/call', { name: 'oms-set-stage', arguments: { stage: 'done' } });
-	const r10 = await waitForResponse(12);
+	const r10 = await waitForResponse(19);
 	assert('oms-set-stage verifying→done', r10?.result?.content?.[0]?.text?.includes('done'), JSON.stringify(r10).slice(0, 200));
 
 	// Tool: oms-set-team (US-002/003 — records team name reference for /oms:team multi-agent mode)
 	// Note: state is 'done' here, but oms-set-team only mutates teamName (no stage transition) so it works in any stage.
 	send('tools/call', { name: 'oms-set-team', arguments: { teamName: 'refactor-utils' } });
-	const r10b = await waitForResponse(13);
+	const r10b = await waitForResponse(20);
 	assert('oms-set-team returns success', r10b?.result?.content?.[0]?.text?.includes('Team name set'), JSON.stringify(r10b).slice(0, 200));
 	assert('oms-set-team mentions team name', r10b?.result?.content?.[0]?.text?.includes('refactor-utils'), JSON.stringify(r10b).slice(0, 200));
 
 	// Tool: oms-get-state should now show the teamName
 	send('tools/call', { name: 'oms-get-state', arguments: {} });
-	const r10c = await waitForResponse(14);
+	const r10c = await waitForResponse(21);
 	assert('oms-get-state shows teamName', r10c?.result?.content?.[0]?.text?.includes('Team:') && r10c?.result?.content?.[0]?.text?.includes('refactor-utils'), JSON.stringify(r10c).slice(0, 300));
 
 	// ── setProjectTeamMode verification (US-team-activation) ──
@@ -165,7 +232,7 @@ async function runTests() {
 	// Stop the session, pre-seed settings.json with extra fields, start a new session,
 	// call oms-set-team again, and confirm the extra fields are still there.
 	send('tools/call', { name: 'oms-stop', arguments: {} });
-	await waitForResponse(15);
+	await waitForResponse(22);
 
 	// Pre-seed settings.json with user fields (ensure .snow dir exists first)
 	mkdirSync(join(tmpRoot, '.snow'), { recursive: true });
@@ -178,9 +245,9 @@ async function runTests() {
 
 	// New session
 	send('tools/call', { name: 'oms-start', arguments: { goal: 'team activation 2' } });
-	await waitForResponse(16);
+	await waitForResponse(23);
 	send('tools/call', { name: 'oms-set-team', arguments: { teamName: 'team-b' } });
-	const rPreserve = await waitForResponse(17);
+	const rPreserve = await waitForResponse(24);
 
 	let preservedOk = false;
 	let preservedDetail = '';
@@ -199,12 +266,12 @@ async function runTests() {
 
 	// ── Idempotency test: calling oms-set-team when teamMode already true should not error ──
 	send('tools/call', { name: 'oms-set-team', arguments: { teamName: 'team-b' } });
-	const rIdem = await waitForResponse(18);
+	const rIdem = await waitForResponse(25);
 	assert('oms-set-team idempotent (second call still succeeds)', rIdem?.result?.content?.[0]?.text?.includes('Team name set'), JSON.stringify(rIdem).slice(0, 200));
 
 	// Tool: oms-stop (final cleanup of the second session)
 	send('tools/call', { name: 'oms-stop', arguments: {} });
-	const r11 = await waitForResponse(19);
+	const r11 = await waitForResponse(26);
 	assert('oms-stop ends session', r11?.result?.content?.[0]?.text?.includes('stopped'), JSON.stringify(r11).slice(0, 200));
 
 	console.log(`\n${'='.repeat(50)}`);

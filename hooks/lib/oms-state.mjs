@@ -326,6 +326,23 @@ export function forceSetStage(state, newStage) {
 	state.stage = newStage;
 	state.stageHistory.push({ stage: newStage, timestamp: new Date().toISOString() });
 	state.updatedAt = new Date().toISOString();
+	// After done→executing (build fail), invalidate completion + code-quality so
+	// done cannot be re-entered without re-review (completion-gates KTD2).
+	if (newStage === 'executing') {
+		try {
+			const ledgerPath = join(getStateDir(), 'verification-ledger.json');
+			if (existsSync(ledgerPath)) {
+				const ledger = JSON.parse(readFileSync(ledgerPath, 'utf-8'));
+				if (ledger && ledger.entries) {
+					delete ledger.entries.completion;
+					delete ledger.entries['code-quality'];
+					writeFileSync(ledgerPath, JSON.stringify(ledger, null, 2), 'utf-8');
+				}
+			}
+		} catch {
+			/* ignore ledger rewrite failures */
+		}
+	}
 }
 
 export function readStdin() {

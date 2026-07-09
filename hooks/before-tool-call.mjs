@@ -70,8 +70,8 @@ function checkStageEnforcement(stage, toolName) {
 						`If you found issues that need fixing:\n` +
 						`  Call oms-set-stage { stage: "executing" }\n\n` +
 						`Then you can edit files to fix the issues (lead self-fix or re-spawn teammate).\n` +
-						`If everything passes:\n` +
-						`  Call oms-set-stage { stage: "done" }`,
+						`If everything passes, complete gates then:\n` +
+						`  task-reconcile + code-quality + completion approvals, then oms-set-stage { stage: "done" }`,
 				};
 			case 'done':
 				return {
@@ -208,6 +208,37 @@ async function main() {
 		}
 		// No active session — allow all tools
 		process.exit(0);
+	}
+
+	// Protect OMS control-plane files from agent write bypass (completion-gates KTD8).
+	if (FILE_WRITE_TOOLS.has(toolName)) {
+		const args = context.args || context.arguments || {};
+		const pathCandidates = [
+			args.path,
+			args.filePath,
+			args.file,
+			args.target,
+			args.target_file,
+			typeof args === 'string' ? args : '',
+		]
+			.filter(Boolean)
+			.map(String);
+		const hitsOmsState = pathCandidates.some(p => {
+			const norm = p.replace(/\\/g, '/').toLowerCase();
+			return (
+				norm.includes('/.snow/oms-state/') ||
+				norm.includes('.snow/oms-state/') ||
+				norm.endsWith('.snow/oms-state') ||
+				/(^|\/)oms-state\//.test(norm)
+			);
+		});
+		if (hitsOmsState) {
+			process.stderr.write(
+				`[OMS:BLOCKED] Cannot write under .snow/oms-state/ — gate ledger and session state are MCP-owned.\n` +
+					`Use oms-prd submit-gate / request-verification / submit-approval and oms-set-stage instead.\n`,
+			);
+			process.exit(1);
+		}
 	}
 
 	// Check stage enforcement

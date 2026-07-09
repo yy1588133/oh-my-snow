@@ -54,7 +54,17 @@ import {
 	readOmsState,
 	deleteOmsState,
 	listOmsModes,
+	canEnterVerifying,
+	canEnterDone,
+	formatLedgerSummary,
+	parseScorecard,
+	approveSelfGate,
+	validateTaskCompleteScorecard,
+	assertApprovingScorecard,
+	getLedgerApproval,
+	setLastGateFailure,
 	type RefinedStoryInput,
+	type GateScope,
 } from './state/store.js';
 import {writeFileSync, mkdirSync, existsSync} from 'fs';
 import {join} from 'path';
@@ -148,16 +158,18 @@ server.registerTool(
 							`Goal: ${state.goal}\n` +
 							`Stage: planning\n` +
 							`Verify Command: ${verifyCmd || '(auto-detect)'}\n\n` +
+							`Gates: required (task-complete → verifying; task-reconcile + code-quality + completion → done)\n\n` +
 							`Next steps:\n` +
 							`1. Analyze the codebase and create a plan\n` +
 							`2. Use oms-add-task to add tasks to the plan\n` +
 							`3. When the plan is ready, call oms-set-stage { stage: "executing" }\n` +
 							`4. Implement tasks using filesystem-* and terminal-execute tools\n` +
 							`5. Use oms-complete-task to mark tasks as done\n` +
-							`6. Call oms-set-stage { stage: "verifying" } when all tasks are done\n` +
-							`7. The system will auto-run build/test after file edits\n` +
-							`8. If issues found, call oms-set-stage { stage: "executing" } to fix them\n` +
-							`9. When everything passes, call oms-set-stage { stage: "done" }`,
+							`6. Submit task-complete gate (oms-prd submit-gate), then oms-set-stage verifying\n` +
+							`7. In verifying: task-reconcile gate, then code-quality + completion via independent #oms_reviewer/#oms_critic\n` +
+							`8. If issues found, oms-set-stage executing and fix; gate rejects bounce to executing\n` +
+							`9. Only after all three ledger approvals: oms-set-stage done (oral done is blocked)\n` +
+							`10. Use oms-get-state for Gate ledger / Last gate failure`,
 					},
 				],
 			};
@@ -227,13 +239,20 @@ server.registerTool(
 								? `Team:    ${state.teamName} (multi-agent mode)\n`
 								: '') +
 							`Created: ${state.createdAt}\n` +
-							`Updated: ${state.updatedAt}\n\n` +
+							`Updated: ${state.updatedAt}\n` +
+							`Gates:   required=${state.gatesRequired === true}\n\n` +
 						`Tasks (${tasks.filter(t => t.completed).length}/${
 							tasks.length
 						} completed):\n` +
 							(taskLines || '  (no tasks yet)') +
 							'\n\n' +
-							`Recent logs:\n` +
+							`Gate ledger:\n${formatLedgerSummary()}\n` +
+							(state.lastGateFailure
+								? `\nLast gate failure (${state.lastGateFailure.at}):\n` +
+									`  scope: ${state.lastGateFailure.scope}\n` +
+									`  ${state.lastGateFailure.summary}\n`
+								: '') +
+							`\nRecent logs:\n` +
 							(recentLogs || '  (none)') +
 							(snapshots ? `\n\nSnapshots:\n${snapshots}` : ''),
 					},
@@ -278,29 +297,55 @@ server.registerTool(
 				};
 			}
 
-			// Completion gate (Phase 3 US-006, AC1.11 — R11 真闭环): transitioning
-			// to 'done' requires an approved completion-scope verification. Without
-			// this gate, AI could call oms-set-stage {stage:"done"} and bypass the
-			// whole verification layer (the v2 plan's critical hole — it only added
-			// oms-prd actions without gating the stage transition).
-			// 过渡期豁免: verification-state.json 不存在时 hasMatchingApproval returns
-			// true (老会话放行). forceSetStage (done→executing build-fail 回退) 不走这个
-			// 工具层, 用 store.forceSetStage 直调, 所以也不受 gate 影响 (AC1.11a).
-			if (params.stage === 'done' && !hasMatchingApproval(null, 'completion')) {
-				return {
-					content: [
-						{
-							type: 'text' as const,
-							text: '❌ Cannot transition to done — no approved completion verification.\n\n' +
-								'Before marking the session done, request a completion-scope review:\n' +
-								'  oms-prd action:"request-verification" storyId:null scope:"completion"\n' +
-								'Then have the reviewer approve via:\n' +
-								'  oms-prd action:"submit-approval" requestId:<token> verdict:"approved" reviewerAgentId:<id>\n' +
-								'Once approved, re-call oms-set-stage { stage: "done" }.',
-						},
-					],
-					isError: true,
-				};
+			// G1: entering verifying requires task-complete / PRD matrix when gatesRequired.
+			if (params.stage === 'verifying' && state.gatesRequired === true) {
+				const prd = loadPrd();
+				const status = prd ? getPrdStatus() : null;
+				const allPrdPass =
+					!!status && status.total > 0 && status.passed === status.total;
+				const check = canEnterVerifying({
+					tasks: Array.isArray(state.tasks) ? state.tasks : [],
+					hasPrd: !!prd && Array.isArray(prd.stories) && prd.stories.length > 0,
+					allPrdStoriesPass: allPrdPass,
+				});
+				if (!check.ok) {
+					setLastGateFailure('task-complete', check.reason, [check.reason]);
+					return {
+						content: [{type: 'text' as const, text: `❌ ${check.reason}`}],
+						isError: true,
+					};
+				}
+			}
+
+			// G2: done requires multi-gate ledger when gatesRequired; else legacy completion.
+			if (params.stage === 'done') {
+				if (state.gatesRequired === true) {
+					const check = canEnterDone(true);
+					if (!check.ok) {
+						setLastGateFailure('done', check.reason, [check.reason]);
+						return {
+							content: [{type: 'text' as const, text: `❌ ${check.reason}`}],
+							isError: true,
+						};
+					}
+				} else if (!hasMatchingApproval(null, 'completion')) {
+					// Legacy: single completion approval (file-missing exemption inside hasMatchingApproval).
+					return {
+						content: [
+							{
+								type: 'text' as const,
+								text:
+									'❌ Cannot transition to done — no approved completion verification.\n\n' +
+									'Before marking the session done, request a completion-scope review:\n' +
+									'  oms-prd action:"request-verification" storyId:null scope:"completion"\n' +
+									'Then have the reviewer approve via:\n' +
+									'  oms-prd action:"submit-approval" requestId:<token> verdict:"approved" reviewerAgentId:<id>\n' +
+									'Once approved, re-call oms-set-stage { stage: "done" }.',
+							},
+						],
+						isError: true,
+					};
+				}
 			}
 
 			const updated = setStage(state, params.stage);
@@ -902,6 +947,7 @@ server.registerTool(
 					'request-verification',
 					'submit-approval',
 					'get-pending-verification',
+					'submit-gate',
 				])
 				.describe('The PRD action to perform'),
 			task: z
@@ -968,10 +1014,23 @@ server.registerTool(
 				.optional()
 				.describe('Progress entry text — required for "log-progress"'),
 			scope: z
-				.enum(['story', 'completion'])
+				.enum([
+					'story',
+					'completion',
+					'task-complete',
+					'task-reconcile',
+					'code-quality',
+				])
 				.optional()
 				.describe(
-					'Verification scope — required for "request-verification". "story" = single story (pass storyId), "completion" = whole-session sign-off (storyId:null).',
+					'Verification/gate scope — request-verification or submit-gate. story | completion | task-complete | task-reconcile | code-quality.',
+				),
+			scorecard: z
+				.string()
+				.max(20000)
+				.optional()
+				.describe(
+					'JSON scorecard for submit-gate: {pass,summary,evidence[],deferred?,diffStat?,noTasksReason?}',
 				),
 			requestId: z
 				.string()
@@ -1629,6 +1688,99 @@ server.registerTool(
 				// oms-set-stage:done (gates check hasMatchingApproval). The token is
 				// unguessable, so an AI that didn't actually call a reviewer can't fake
 				// an approval.
+				case 'submit-gate': {
+					// Self-gates: task-complete / task-reconcile write ledger directly.
+					// code-quality requires allowlisted reviewer via request+submit (use those).
+					const scope = params.scope as GateScope | undefined;
+					if (
+						!scope ||
+						(scope !== 'task-complete' && scope !== 'task-reconcile')
+					) {
+						return {
+							content: [
+								{
+									type: 'text' as const,
+									text:
+										'Error: submit-gate supports scope "task-complete" or "task-reconcile" only.\n' +
+										'For code-quality / completion use request-verification + submit-approval with reviewerAgentId oms_critic|oms_reviewer.',
+								},
+							],
+							isError: true,
+						};
+					}
+					if (!params.scorecard) {
+						return {
+							content: [
+								{
+									type: 'text' as const,
+									text: 'Error: "scorecard" JSON is required for submit-gate.',
+								},
+							],
+							isError: true,
+						};
+					}
+					try {
+						const card = parseScorecard(params.scorecard);
+						assertApprovingScorecard(card, scope);
+						if (scope === 'task-complete') {
+							const st = loadState();
+							const prd = loadPrd();
+							const status = prd ? getPrdStatus() : null;
+							const allPrdPass =
+								!!status &&
+								status.total > 0 &&
+								status.passed === status.total;
+							const reasons = validateTaskCompleteScorecard(
+								card,
+								st?.tasks ?? [],
+								allPrdPass,
+							);
+							if (reasons.length) {
+								setLastGateFailure('task-complete', reasons.join('; '), reasons);
+								return {
+									content: [
+										{
+											type: 'text' as const,
+											text: `❌ task-complete rejected:\n- ${reasons.join('\n- ')}`,
+										},
+									],
+									isError: true,
+								};
+							}
+						}
+						if (scope === 'task-reconcile') {
+							// Order: nothing special for reconcile first
+						}
+						const entry = approveSelfGate({
+							scope,
+							scorecard: card,
+							reviewerAgentId: params.reviewerAgentId ?? 'executor',
+						});
+						return {
+							content: [
+								{
+									type: 'text' as const,
+									text:
+										`✅ Gate ${scope} approved on ledger.\n` +
+										`requestId: ${entry.requestId}\n` +
+										`summary: ${card.summary}\n` +
+										`Ledger:\n${formatLedgerSummary()}`,
+								},
+							],
+						};
+					} catch (e) {
+						return {
+							content: [
+								{
+									type: 'text' as const,
+									text: `❌ submit-gate failed: ${(e as Error).message}`,
+								},
+							],
+							isError: true,
+						};
+					}
+				}
+
 				case 'request-verification': {
 					if (!params.scope) {
 						return {
@@ -1653,8 +1805,30 @@ server.registerTool(
 							isError: true,
 						};
 					}
-					const storyId = params.scope === 'story' ? (params.storyId as string) : null;
-					const v = requestVerification(storyId, params.scope, params.criterionIndex ?? null);
+					// Order hard-gate: code-quality requires task-reconcile first.
+					if (
+						params.scope === 'code-quality' &&
+						!getLedgerApproval('task-reconcile')
+					) {
+						return {
+							content: [
+								{
+									type: 'text' as const,
+									text:
+										'❌ Cannot request code-quality until task-reconcile is approved.\n' +
+										'  oms-prd action:"submit-gate" scope:"task-reconcile" scorecard:\'{"pass":true,"summary":"...","evidence":["..."]}\'',
+								},
+							],
+							isError: true,
+						};
+					}
+					const storyId =
+						params.scope === 'story' ? (params.storyId as string) : null;
+					const v = requestVerification(
+						storyId,
+						params.scope as GateScope,
+						params.criterionIndex ?? null,
+					);
 					return {
 						content: [
 							{
@@ -1731,6 +1905,8 @@ server.registerTool(
 							'expired': 'This verification is past its TTL (2 hours). Re-request a fresh verification.',
 							'max-attempts': 'Too many failed submit-approval attempts (reject count exceeded). Re-request a new verification to reset.',
 							'missing': 'No pending verification exists. Call request-verification first.',
+							'forbidden':
+								'reviewerAgentId is not allowed for this scope (self/main blocked for completion and code-quality). Use oms_critic or oms_reviewer after spawning an independent reviewer.',
 						};
 						return {
 							content: [
