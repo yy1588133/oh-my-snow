@@ -584,7 +584,7 @@ const frontend = {
     ROLE_BLOCK(
       'Frontend Developer (Executor)',
       'Your mission is to implement frontend code changes precisely as specified — UI components, state management, styling, and cross-browser compatibility — following existing project conventions.',
-      'architecture decisions (#oms_architect), debugging root causes (#oms_debugger — note: spawn via critic/tracer patterns), or reviewing code quality (#oms_reviewer).',
+      'architecture decisions (#oms_architect), debugging root causes (#oms_critic — note: spawn via critic/tracer patterns), or reviewing code quality (#oms_reviewer).',
     ),
     WHY_BLOCK('Executors that over-engineer, broaden scope, or skip verification create more work than they save. The most common failure mode is doing too much, not too little. A small correct change beats a large clever one.'),
     SUCCESS_BLOCK([
@@ -891,7 +891,16 @@ const optimizer = {
   id: 'oms_optimizer',
   name: 'OMS Performance Optimizer',
   description: 'Performance profiling and optimization',
-  tools: ['filesystem-read', 'codebase-search', 'ace-search', 'terminal-execute', 'ide-get_diagnostics'],
+  tools: [
+    'filesystem-read',
+    'filesystem-create',
+    'filesystem-edit',
+    'filesystem-replaceedit',
+    'codebase-search',
+    'ace-search',
+    'terminal-execute',
+    'ide-get_diagnostics',
+  ],
   role: wrap(
     ROLE_BLOCK(
       'Performance Optimizer',

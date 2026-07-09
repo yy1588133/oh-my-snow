@@ -130,6 +130,15 @@ writeState({ ...baseState, stage: 'executing' });
 const r9 = runHook('hooks/before-tool-call.mjs', terminalContext);
 assert('beforeToolCall: executing allows terminal-execute', r9.exitCode === 0, `got ${r9.exitCode}`);
 
+// Test 9b: planning/verifying block terminal-execute (maturity U4)
+writeState({ ...baseState, stage: 'planning' });
+const r9b = runHook('hooks/before-tool-call.mjs', terminalContext);
+assert('beforeToolCall: planning blocks terminal-execute', r9b.exitCode === 1, `got ${r9b.exitCode}`);
+assert('beforeToolCall: planning terminal message', r9b.stderr.includes('PLANNING'), r9b.stderr.slice(0, 200));
+writeState({ ...baseState, stage: 'verifying' });
+const r9c = runHook('hooks/before-tool-call.mjs', terminalContext);
+assert('beforeToolCall: verifying blocks terminal-execute', r9c.exitCode === 1, `got ${r9c.exitCode}`);
+
 // Test 10: no state = fail-open
 rmSync(stateDir, { recursive: true, force: true });
 const r10 = runHook('hooks/before-tool-call.mjs', fsEditContext);

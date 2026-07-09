@@ -33,7 +33,7 @@ and the approval gate. Do NOT re-derive these rules from the command prompt.
 - User wants end-to-end autonomous execution → use `/oms:auto`
 - Request is a single clear fix with obvious scope → use `/oms:dive` or
   delegate directly to an executor sub-agent
-- User wants to start coding immediately with a clear task → use `/oms:ralph`
+- User wants to start coding immediately with a clear task → use `/oms:goal`
 - User asks a simple question that can be answered directly → just answer it
 
 ---
@@ -195,7 +195,7 @@ execution.
   `askuser-ask_question` with these options:
   - Approve via `/oms:team` (parallel coordinated agents — recommended for
     large tasks)
-  - Approve via `/oms:ralph` (serial execution with per-story verification)
+  - Approve via `/oms:goal` (serial execution with per-story verification)
   - Approve via `/oms:auto` (autonomous loop)
   - Request changes (return to step 1 with feedback)
   - Reject (discard the plan entirely)
@@ -216,7 +216,7 @@ After the user explicitly approves:
    why decisions were made.
 3. **Transition to executing** — call `oms-set-stage` with `stage: "executing"`.
 4. **Hand off to the chosen execution skill** — invoke `/oms:team`,
-   `/oms:ralph`, or `/oms:auto` with the plan context. Do NOT implement
+   `/oms:goal`, or `/oms:auto` with the plan context. Do NOT implement
    directly in the planning agent.
 
 ### Review Mode (`--review`)

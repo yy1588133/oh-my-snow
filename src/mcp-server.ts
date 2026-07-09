@@ -81,13 +81,18 @@ server.registerTool(
 		description:
 			'Initialize an OMS orchestration session. Creates state.json and enters the "planning" stage. Call this first before any other oms-* tools.',
 		inputSchema: {
-			goal: z.string().min(1).max(2000).describe('The high-level goal the AI should accomplish'),
+			goal: z
+				.string()
+				.trim()
+				.min(1)
+				.max(2000)
+				.describe('The high-level goal the AI should accomplish'),
 			verifyCommand: z
 				.string()
 				.max(500)
 				.optional()
 				.describe(
-					'Command to run for build/test verification (e.g. "npm test", "dotnet build"). If omitted, auto-detect from project files.',
+					'Command to run for build/test verification (e.g. "npm test", "dotnet build"). If omitted, auto-detect from project files. Allowed: alphanumerics, paths, flags, &&, |. Blocked: ; ` $ <> newline/CR || bare & (background).',
 				),
 		},
 	},
@@ -332,6 +337,7 @@ server.registerTool(
 		inputSchema: {
 			description: z
 				.string()
+				.trim()
 				.min(1)
 				.max(2000)
 				.describe('Clear, actionable description of the task'),
@@ -2000,10 +2006,26 @@ server.registerTool(
 			}. Tasks: ${tasks.filter(t => t.completed).length}/${
 				tasks.length
 			} completed. Turns: ${state.turnCount}.`;
-			deleteState();
+			const cleaned = deleteState();
 			// Also clean up Ralph PRD files (prd.json + progress.txt) if present.
 			// Safe no-op if Ralph was never used.
 			deletePrd();
+			if (!cleaned) {
+				return {
+					content: [
+						{
+							type: 'text' as const,
+							text:
+								`⚠️ OMS session stop incomplete — critical state artifacts remain on disk.\n\n` +
+								`${summary}\n\n` +
+								`state.json and/or verify.cmd could not be deleted (file in use / permissions).\n` +
+								`Manually remove .snow/oms-state/state.json and verify.cmd before oms-start,\n` +
+								`or residual verify.cmd may drive the next session's auto-verify gate.`,
+						},
+					],
+					isError: true,
+				};
+			}
 			return {
 				content: [
 					{

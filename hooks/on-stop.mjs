@@ -280,24 +280,35 @@ function runVerification(state) {
 	// validates on input, but a stored command could have been tampered with
 	// on disk or set by a legacy state.json. This is the last line of defense
 	// before execSync(verifyCmd, { shell: true }).
-	if (/[;`$]/.test(verifyCmd) || verifyCmd.includes('\n') || verifyCmd.replace(/&&/g, '').includes('&')) {
+	// Keep denylist in lockstep with src/state/store.ts validateVerifyCommand.
+	// Residual risk: bare | remains allowed (pipe UX); || is blocked (silent-green).
+	if (
+		/[;`$<>]/.test(verifyCmd) ||
+		/[\n\r\u2028\u2029\f\v]/.test(verifyCmd) ||
+		verifyCmd.includes('||') ||
+		verifyCmd.replace(/&&/g, '').includes('&')
+	) {
 		if (markerExists) {
 			try { unlinkSync(markerPath); } catch {}
 		}
 		return `[OMS:VERIFY] Verify command contains dangerous shell metacharacters and was rejected for security.\n` +
 			`Command: "${verifyCmd.slice(0, 100)}"\n\n` +
-			`Blocked characters: ; backtick $ newline & (background)\n` +
-			`Run oms-stop and restart with a safe verify command (allowed: &&, ||, |).\n\n`;
+			`Blocked characters: ; backtick $ <> newline/CR || & (background)\n` +
+			`Run oms-stop and restart with a safe verify command (allowed: &&, |).\n\n`;
 	}
 
 	let buildErrorPrefix = '';
+
+	// VERIFY_TIMEOUT_MS must stay below assets/hooks/onStop.json host timeout
+	// (HOST=330000, BUFFER=30000 → host >= verify + buffer). See maturity U1.
+	const VERIFY_TIMEOUT_MS = 300000;
 
 	// Execute the verify command (always — caller decides whether to invoke us)
 	try {
 		execSync(verifyCmd, {
 			cwd: process.cwd(),
 			encoding: 'utf-8',
-			timeout: 300000,
+			timeout: VERIFY_TIMEOUT_MS,
 			shell: true,
 			stdio: ['pipe', 'pipe', 'pipe'],
 		});
@@ -307,15 +318,24 @@ function runVerification(state) {
 		// and error.signal when the timeout fires. Without this check the AI
 		// receives "BUILD FAILED" and tries to fix code, when the real issue
 		// is a hung test/process that needs to be killed, not debugged.
-		if (error.killed || error.signal === 'SIGTERM') {
+		// Prefer timed-out message / ETIMEDOUT; killed+SIGTERM is secondary (Node
+		// timeout path usually sets both). Avoid labeling unrelated SIGTERM as timeout.
+		const errMsg = String(error.message || '');
+		const timedOut =
+			error.killed === true ||
+			error.code === 'ETIMEDOUT' ||
+			/ETIMEDOUT|timed out/i.test(errMsg);
+		if (timedOut) {
 			buildErrorPrefix =
 				`[OMS:VERIFY TIMEOUT] Auto-verification command timed out after 300s.\n` +
 				`Command: "${verifyCmd}"\n\n` +
 				`The command did not finish within the 5-minute timeout. This usually means:\n` +
 				`  - A test or process is hung (deadlock, infinite loop, waiting for input)\n` +
 				`  - A dev server was started and never exited\n\n` +
-				`Check for hung processes. If the command genuinely needs more time,\n` +
-				`consider splitting it into smaller verification steps.\n\n`;
+				`Check for hung processes. If you are in the "verifying" stage, switch back:\n` +
+				`  oms-set-stage { stage: "executing" }\n` +
+				`Then fix the hang, or oms-stop and restart with a faster verifyCommand.\n` +
+				`Note: shell:true may leave orphan child processes after the timeout kill.\n\n`;
 		} else {
 			const buildError = error.stderr || error.stdout || error.message || 'Unknown build error';
 			const truncated = buildError.length > 2000 ? '...\n' + buildError.slice(-2000) : buildError;

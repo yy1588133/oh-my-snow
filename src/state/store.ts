@@ -156,20 +156,24 @@ export function validateVerifyCommand(cmd: string): void {
 	// ; — command separator (allows injecting a second command)
 	// ` — backtick command substitution
 	// $ — variable/parameter expansion ($() ${})
-	// newline — command separator
+	// newline / CR / Unicode line separators — command separator
+	// < > — shell redirects (write/overwrite files, feed stdin from paths)
 	// & (when not part of &&) — background execution
 	// Strip all && first so a legit "a && b" doesn't trip the check, then
 	// any remaining & is a background-execution injection.
+	// || is blocked: `npm test || true` would silent-green the auto-verify gate.
+	// bare | remains allowed for pipe UX (residual risk — pipe-to-interpreter).
 	const hasDangerous =
-		/[;`$]/.test(cmd) ||
-		cmd.includes('\n') ||
+		/[;`$<>]/.test(cmd) ||
+		/[\n\r\u2028\u2029\f\v]/.test(cmd) ||
+		cmd.includes('||') ||
 		cmd.replace(/&&/g, '').includes('&');
 	if (hasDangerous) {
 		throw new Error(
 			`Verify command contains potentially dangerous shell metacharacters. ` +
 				`Rejected for security (prevents prompt-injection-driven command execution). ` +
-				`Allowed: alphanumerics, paths, flags, &&, ||, |. ` +
-				`Blocked: ; backtick $ newline & (background). ` +
+				`Allowed: alphanumerics, paths, flags, &&, |. ` +
+				`Blocked: ; backtick $ <> newline/CR || & (background). ` +
 				`Command was: "${cmd.slice(0, 100)}"`,
 		);
 	}
@@ -316,7 +320,13 @@ function withFileLock<T>(
 			closeSync(fd);
 			lockCreated = true;
 			break;
-		} catch {
+		} catch (error) {
+			// Only EEXIST means another holder — retry. EACCES/ENOSPC/etc. must not
+			// be misreported as lock contention (would silent-skip teamMode writes).
+			const code = (error as NodeJS.ErrnoException)?.code;
+			if (code !== 'EEXIST') {
+				throw error;
+			}
 			if (attempt < MAX_RETRIES - 1) {
 				syncSleep(RETRY_DELAY_MS);
 			}
@@ -340,8 +350,8 @@ function withFileLock<T>(
 
 /**
  * Shared atomic-write primitive: acquire a lock, write to tmp, rename, release lock.
- * Used by saveState (state.json), atomicWriteFile (prd.json), and setProjectTeamMode
- * (project settings.json) so a single bugfix here fixes all three call sites.
+ * Used by saveState (state.json) and atomicWriteFile (prd.json).
+ * RMW paths (setProjectTeamMode) use withFileLock + tmpRenameWrite instead.
  *
  * Behavior on lock contention (after MAX_RETRIES):
  *   - onContention = 'skip'   → return false, no write (state.json — never corrupt)
@@ -391,7 +401,12 @@ function atomicWriteWithLock(
 			closeSync(fd);
 			lockCreated = true;
 			break;
-		} catch {
+		} catch (error) {
+			// Only EEXIST is lock contention. Permission/disk errors must surface.
+			const code = (error as NodeJS.ErrnoException)?.code;
+			if (code !== 'EEXIST') {
+				throw error;
+			}
 			if (attempt < MAX_RETRIES - 1) {
 				syncSleep(RETRY_DELAY_MS);
 			}
@@ -554,7 +569,14 @@ function escapeRegex(s: string): string {
 	return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
-export function deleteState(): void {
+/**
+ * Best-effort session cleanup. Each step is independently try/caught so one
+ * Windows file-in-use failure does not skip the rest.
+ *
+ * @returns true if critical artifacts (state.json + verify.cmd) are gone;
+ *          false if either still exists after cleanup (caller should surface isError).
+ */
+export function deleteState(): boolean {
 	const filePath = getStateFilePath();
 	// Each cleanup step is independently wrapped so that a failure on one
 	// (file locked, permission denied, Windows file-in-use) does NOT skip
@@ -585,6 +607,17 @@ export function deleteState(): void {
 	// Phase 3 US-007: also clear verification-state.json on oms-stop so a
 	// fresh session doesn't inherit a stale approval from the prior run.
 	deleteVerificationState();
+
+	// Surface partial failure so oms-stop does not claim success while a
+	// residual verify.cmd could still drive the next session's silent gate.
+	const criticalRemain = existsSync(filePath) || existsSync(verifyPath);
+	if (criticalRemain) {
+		console.error(
+			'[OMS] deleteState: critical artifacts remain after cleanup ' +
+				`(state.json=${existsSync(filePath)}, verify.cmd=${existsSync(verifyPath)})`,
+		);
+	}
+	return !criticalRemain;
 }
 
 // ── State mutations ──
@@ -685,8 +718,8 @@ export function completeTask(state: OmsState, taskId: string): OmsState {
  *
  * @returns true if the file was actually changed (teamMode was not already true),
  *          false if teamMode was already true (no write needed).
- * @throws on unrecoverable I/O errors (lock contention after retries is NOT
- *         thrown — it returns false to avoid blocking the tool call).
+ * @throws on unrecoverable I/O errors, lock contention after retries, or write failure.
+ *         Callers must NOT treat false as "activated" — false means already enabled only.
  */
 export function setProjectTeamMode(enabled: boolean): boolean {
 	const settingsPath = join(process.cwd(), '.snow', 'settings.json');
@@ -726,24 +759,35 @@ export function setProjectTeamMode(enabled: boolean): boolean {
 			// Write while still holding the lock — tmp+rename keeps the file
 			// atomic, and the lock ensures no other process interleaves a write.
 			const content = JSON.stringify(settings, null, 2);
-			return tmpRenameWrite(settingsPath, content);
+			const wrote = tmpRenameWrite(settingsPath, content);
+			if (!wrote) {
+				throw new Error(
+					`Failed to write teamMode to .snow/settings.json (tmp+rename failed). ` +
+						`Retry oms-set-team, or set teamMode=true manually and re-run.`,
+				);
+			}
+			return true;
 		},
 		settingsDir,
 	);
 
 	if (result === undefined) {
-		// Lock contention — another process holds the lock.
-		console.error('[OMS] setProjectTeamMode: lock contention, skipping write');
-		return false;
+		// Lock contention — throw so MCP does not claim ACTIVATED while teamMode is false.
+		throw new Error(
+			`Failed to write teamMode — lock contention on .snow/settings.json after retries. ` +
+				`Another process holds the lock. Retry oms-set-team in a moment.`,
+		);
 	}
 
 	return result;
 }
 
 /**
- * Set the team name reference on the state AND activate snow-cli Team Mode.
+ * Record team name and activate teamMode.
  * Used by /oms:team to record which snow-cli team this session orchestrates
  * and to flip teamMode=true so team-* tools become visible on the next turn.
+ * @throws if teamMode cannot be written (lock contention, corrupt settings, I/O).
+ *         teamName is still saved first so a retry can re-run activation only if needed.
  */
 export function setTeamName(state: OmsState, teamName: string): OmsState {
 	state.teamName = teamName;
@@ -752,14 +796,9 @@ export function setTeamName(state: OmsState, teamName: string): OmsState {
 
 	// Activate snow-cli Team Mode (writes project-level .snow/settings.json).
 	// This is what actually mounts the team-* tools for the lead on the next turn.
-	try {
-		setProjectTeamMode(true);
-	} catch (error) {
-		// Don't fail the whole tool call if settings.json can't be updated —
-		// the teamName is still recorded, and the command prompt instructs the
-		// user to run /team manually as a fallback.
-		console.error(`[OMS] setTeamName: failed to activate teamMode: ${(error as Error).message}`);
-	}
+	// Do NOT swallow failures: MCP must not claim ACTIVATED when write failed.
+	// teamName is already persisted — agent can retry oms-set-team after fixing settings.
+	setProjectTeamMode(true);
 
 	return state;
 }

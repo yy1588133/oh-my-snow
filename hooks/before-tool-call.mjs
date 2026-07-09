@@ -18,7 +18,7 @@
  *   This ensures the hook only fires for filesystem WRITE tools.
  */
 
-import { loadState, readStdin, appendErrorLog } from './lib/oms-state.mjs';
+import { loadState, readStdin, appendErrorLog, inspectStateFile } from './lib/oms-state.mjs';
 
 // ── Stage enforcement matrix ──
 
@@ -87,17 +87,43 @@ function checkStageEnforcement(stage, toolName) {
 		}
 	}
 
-	// Terminal tools — blocked in done stage
+	// Terminal tools — blocked outside executing (shell can write files and
+	// would otherwise bypass the filesystem stage gate).
 	if (TERMINAL_TOOLS.has(toolName)) {
-		if (stage === 'done') {
-			return {
-				allowed: false,
-				reason:
-					`[OMS:BLOCKED] The orchestration session is DONE — no further commands allowed.\n\n` +
-					`If you need to do more work, start a new session with oms-start.`,
-			};
+		switch (stage) {
+			case 'planning':
+				return {
+					allowed: false,
+					reason:
+						`[OMS:BLOCKED] You are in the PLANNING stage — terminal-execute is not allowed.\n` +
+						`Shell can modify the workspace and would bypass the file-edit gate.\n\n` +
+						`Use read-only tools (filesystem-read, codebase-search, ace-search) for analysis.\n` +
+						`When ready to implement:\n` +
+						`  Call oms-set-stage { stage: "executing" }\n` +
+						`Then terminal-execute is allowed.`,
+				};
+			case 'verifying':
+				return {
+					allowed: false,
+					reason:
+						`[OMS:BLOCKED] You are in the VERIFYING stage — terminal-execute is not allowed.\n` +
+						`Review with read-only tools. Auto-verification runs via onStop.\n\n` +
+						`If you need to fix issues:\n` +
+						`  Call oms-set-stage { stage: "executing" }\n` +
+						`If everything passes:\n` +
+						`  Call oms-set-stage { stage: "done" }`,
+				};
+			case 'done':
+				return {
+					allowed: false,
+					reason:
+						`[OMS:BLOCKED] The orchestration session is DONE — no further commands allowed.\n\n` +
+						`If you need to do more work, start a new session with oms-start.`,
+				};
+			// executing allows terminal
+			default:
+				return { allowed: true, reason: '' };
 		}
-		return { allowed: true, reason: '' };
 	}
 
 	// Team spawn tool — delayed-spawn enforcement.
@@ -169,6 +195,26 @@ async function main() {
 	// Only check if we have an active OMS session
 	const state = loadState();
 	if (!state) {
+		// loadState null: no file, expired, or corrupt. No file → fail-open
+		// (non-OMS usage). Expired/corrupt + write tools → fail-closed so a
+		// zombie session cannot silently bypass stage gates.
+		const status = inspectStateFile();
+		if (
+			(status === 'expired' || status === 'corrupt') &&
+			(FILE_WRITE_TOOLS.has(toolName) || TERMINAL_TOOLS.has(toolName))
+		) {
+			const label = status === 'expired' ? 'STATE EXPIRED' : 'STATE CORRUPT';
+			const detail =
+				status === 'expired'
+					? 'Session state is stale (no activity > 2h).'
+					: 'Session state.json is corrupt or unreadable.';
+			process.stderr.write(
+				`[OMS:BLOCKED] ${label} — ${detail}\n` +
+					`Write tools and terminal-execute are blocked until the session is cleaned up.\n\n` +
+					`Run oms-stop to clean up, or delete .snow/oms-state/state.json, then oms-start.\n`,
+			);
+			process.exit(1);
+		}
 		// No active session — allow all tools
 		process.exit(0);
 	}

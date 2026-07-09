@@ -1,43 +1,43 @@
 {
-	"name": "oh-my-snow",
-	"version": "0.2.0",
-	"description": "Oh-My-Snow — Autonomous orchestration plugin for Snow CLI",
-	"type": "module",
-	"main": "dist/mcp-server.js",
-	"bin": {
-		"oms": "dist/installer.js"
-	},
-	"files": [
-		"dist",
-		"assets",
-		"hooks",
-		"README.md"
-	],
-	"scripts": {
-		"build": "tsc",
-		"dev": "tsc --watch",
-		"start": "node dist/mcp-server.js",
-		"test": "node test/test-hooks.mjs && node test/test-v2-hooks.mjs && node test/test-mcp.mjs && node test/test-skill-evolution.mjs && node test/test-review-fixes.mjs && node test/test-prd-fixes.mjs && node test/test-iteration-limits.mjs && node test/test-state-expire.mjs && node test/test-prd-verification.mjs && node test/test-completion-gate.mjs && node test/test-oms-state.mjs && node test/test-installer.mjs && node test/test-direct-invocation.mjs",
-		"prepublishOnly": "npm run build && npm test"
-	},
-	"keywords": [
-		"snow-cli",
-		"mcp",
-		"orchestration",
-		"autonomous",
-		"ai",
-		"plugin"
-	],
-	"license": "MIT",
-	"engines": {
-		"node": ">=18"
-	},
-	"dependencies": {
-		"@modelcontextprotocol/sdk": "^1.12.1",
-		"zod": "^3.25.0"
-	},
-	"devDependencies": {
-		"typescript": "^5.7.0",
-		"@types/node": "^22.10.0"
-	}
+  "name": "oh-my-snow",
+  "version": "0.2.0",
+  "description": "Oh-My-Snow — Autonomous orchestration plugin for Snow CLI",
+  "type": "module",
+  "main": "dist/mcp-server.js",
+  "bin": {
+    "oms": "dist/installer.js"
+  },
+  "files": [
+    "dist",
+    "assets",
+    "hooks",
+    "README.md"
+  ],
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsc --watch",
+    "start": "node dist/mcp-server.js",
+    "test": "node test/test-hooks.mjs && node test/test-v2-hooks.mjs && node test/test-mcp.mjs && node test/test-skill-evolution.mjs && node test/test-review-fixes.mjs && node test/test-prd-fixes.mjs && node test/test-iteration-limits.mjs && node test/test-state-expire.mjs && node test/test-prd-verification.mjs && node test/test-completion-gate.mjs && node test/test-oms-state.mjs && node test/test-installer.mjs && node test/test-direct-invocation.mjs && node test/test-verify-hardening.mjs && node test/test-maturity-contracts.mjs && node test/test-doctor.mjs",
+    "prepublishOnly": "npm run build && npm test"
+  },
+  "keywords": [
+    "snow-cli",
+    "mcp",
+    "orchestration",
+    "autonomous",
+    "ai",
+    "plugin"
+  ],
+  "license": "MIT",
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.12.1",
+    "zod": "^3.25.0"
+  },
+  "devDependencies": {
+    "typescript": "^5.7.0",
+    "@types/node": "^22.10.0"
+  }
 }

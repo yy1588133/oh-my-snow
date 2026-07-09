@@ -22,6 +22,7 @@ OMS wraps Snow CLI with a state machine, stage enforcement, auto-verification, a
 ```bash
 npm install -g oh-my-snow
 oms setup
+oms doctor   # optional post-install health check
 ```
 
 The `oms setup` command:
@@ -98,7 +99,7 @@ planning → executing → verifying → done
 | `/oms:team <N> <goal>`    | Multi-agent orchestration — N teammates in isolated git worktrees, lead orchestrates           |
 | `/oms:plan <goal>`        | Iterative planning with consensus — analyze, create tasks, discuss with user                   |
 | `/oms:qa <context>`       | QA loop — diagnose issues, fix them, run build/test until clean                                |
-| `/oms:goal <description>` | Generate a structured goal artifact with scope and success criteria                            |
+| `/oms:goal <description>` | Ralph PRD loop — load `oms/ralph`, refine stories, implement until acceptance + reviewer pass  |
 | `/oms:verify <context>`   | Manual verification — review changes and run build/test                                        |
 | `/oms:release <context>`  | Release flow — version bump, changelog, git tag                                                |
 | `/oms:save <context>`     | Save session memory — snapshot state and extract reusable patterns                             |
@@ -118,6 +119,9 @@ Each maps to a skill via the `skill-execute` tool — equivalent to `/skill oms/
 | `/oms:vverify <target>`    | `oms/vverify`    | Screenshot-driven visual QA judge — strict JSON verdict + 90-score threshold                     |
 | `/oms:wiki <target>`       | `oms/wiki`       | Persistent markdown knowledge base — ingest/query/lint, cross-session accumulation               |
 | `/oms:research <question>` | `oms/research`   | Autonomous multi-step research combining web search and code analysis |
+| `/oms:learn`               | `oms/learn`      | Session-to-skill extractor + evolution pipeline                         |
+
+> **Note:** `/oms:goal` loads skill `oms/ralph` (Ralph persistence loop). There is no `/oms:ralph` slash command. `/oms:auto` and `/oms:team` are **commands**, not skills — do not `skill-execute oms/auto` or `oms/team`.
 
 ## MCP Tools
 
@@ -149,6 +153,8 @@ Load a skill with `/skill oms/<name>`, or use the corresponding `/oms:<name>` co
 | `wiki`          | Persistent markdown knowledge base — ingest/query/lint, cross-session accumulation               |
 | `research`      | Autonomous multi-step research combining web search and code analysis            |
 | `learn`         | Session-to-skill extractor + self-contained evolution pipeline (reflect → explore → evaluate) |
+| `plan`          | Strategic planning with interview/direct/consensus modes and approval gate       |
+| `ralph`         | PRD-driven persistence loop (entry command: `/oms:goal`)                         |
 
 ## Sub-Agents
 

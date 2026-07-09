@@ -5,7 +5,7 @@
 			{
 				"type": "command",
 				"command": "node .snow/oms-state/on-stop.mjs",
-				"timeout": 120000,
+				"timeout": 330000,
 				"enabled": true
 			}
 		]

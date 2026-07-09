@@ -34,6 +34,7 @@ import {
 	rmSync,
 	readdirSync,
 	realpathSync,
+	renameSync,
 } from 'fs';
 import {join, dirname, resolve} from 'path';
 import {homedir} from 'os';
@@ -336,9 +337,16 @@ function setupSkills(packageDir: string): void {
 		return;
 	}
 
-	// Remove existing OMS skills directory if present, then copy fresh
+	// Backup existing OMS skills before wipe-and-copy so user customizations
+	// are not silently destroyed (maturity U7).
 	if (existsSync(SKILLS_TARGET)) {
-		rmSync(SKILLS_TARGET, {recursive: true, force: true});
+		const bak = `${SKILLS_TARGET}.bak-${new Date().toISOString().replace(/[:.]/g, '-')}`;
+		try {
+			renameSync(SKILLS_TARGET, bak);
+			console.log(c.yellow(`  ⚠ Existing skills backed up to ${bak}`));
+		} catch {
+			rmSync(SKILLS_TARGET, {recursive: true, force: true});
+		}
 	}
 
 	mkdirSync(SKILLS_TARGET, {recursive: true});
@@ -371,9 +379,15 @@ function setupCommands(packageDir: string): void {
 		return;
 	}
 
-	// Remove existing OMS commands directory if present, then copy fresh
+	// Backup existing commands before wipe-and-copy (maturity U7).
 	if (existsSync(COMMANDS_TARGET)) {
-		rmSync(COMMANDS_TARGET, {recursive: true, force: true});
+		const bak = `${COMMANDS_TARGET}.bak-${new Date().toISOString().replace(/[:.]/g, '-')}`;
+		try {
+			renameSync(COMMANDS_TARGET, bak);
+			console.log(c.yellow(`  ⚠ Existing commands backed up to ${bak}`));
+		} catch {
+			rmSync(COMMANDS_TARGET, {recursive: true, force: true});
+		}
 	}
 
 	mkdirSync(COMMANDS_TARGET, {recursive: true});
@@ -450,16 +464,30 @@ function setupHooks(packageDir: string): void {
 				}
 			}
 
-			// Read existing rules (if any) and filter out old OMS rules
+			// Read existing rules (if any) and filter out old OMS rules.
+			// Corrupt JSON: skip this file entirely — never wipe user hooks
+			// down to OMS-only rules (maturity U7).
 			let existingRules: unknown[] = [];
 			if (existsSync(configDstPath)) {
 				try {
 					const existingData = readJson<unknown[]>(configDstPath);
 					if (Array.isArray(existingData)) {
 						existingRules = existingData;
+					} else {
+						console.warn(
+							c.yellow(
+								`  ⚠ Skipping ${configFile}: existing file is not a JSON array — fix it manually, then re-run oms setup.`,
+							),
+						);
+						continue;
 					}
-				} catch {
-					existingRules = [];
+				} catch (error) {
+					console.warn(
+						c.yellow(
+							`  ⚠ Skipping ${configFile}: corrupt JSON (${(error as Error).message}) — not overwritten.`,
+						),
+					);
+					continue;
 				}
 			}
 
@@ -775,6 +803,207 @@ function isDirectInvocation(): boolean {
 	return invoked === here;
 }
 
+/**
+ * Read package version from package.json next to dist/ or package root.
+ */
+function getPackageVersion(packageDir: string): string {
+	try {
+		const pkg = JSON.parse(
+			readFileSync(join(packageDir, 'package.json'), 'utf-8'),
+		) as {version?: string};
+		return pkg.version ?? 'unknown';
+	} catch {
+		return 'unknown';
+	}
+}
+
+/**
+ * Read timeout from installed or package onStop.json (first rule, first hook).
+ */
+function readOnStopTimeout(onStopPath: string): number | null {
+	try {
+		const data = JSON.parse(readFileSync(onStopPath, 'utf-8')) as unknown;
+		if (!Array.isArray(data) || data.length === 0) return null;
+		const hooks = (data[0] as {hooks?: unknown}).hooks;
+		if (!Array.isArray(hooks) || hooks.length === 0) return null;
+		const timeout = (hooks[0] as {timeout?: unknown}).timeout;
+		return typeof timeout === 'number' ? timeout : null;
+	} catch {
+		return null;
+	}
+}
+
+/**
+ * oms doctor — post-install health check (maturity U9).
+ * Exit 0 when healthy, 1 when any check fails.
+ */
+function doctor(): void {
+	const packageDir = findPackageDir();
+	const checks: {ok: boolean; label: string; detail: string}[] = [];
+
+	// Package resolvable
+	const pkgOk = Boolean(packageDir && existsSync(join(packageDir, 'package.json')));
+	checks.push({
+		ok: pkgOk,
+		label: 'package',
+		detail: pkgOk
+			? `oh-my-snow ${getPackageVersion(packageDir!)} @ ${packageDir}`
+			: 'oh-my-snow package not found (npm install -g oh-my-snow)',
+	});
+
+	// MCP registration
+	let mcpOk = false;
+	let mcpDetail = 'settings.json missing or unreadable';
+	if (existsSync(SETTINGS_PATH)) {
+		try {
+			const settings = JSON.parse(readFileSync(SETTINGS_PATH, 'utf-8')) as {
+				mcpServers?: Record<string, {command?: string; args?: string[]}>;
+			};
+			const oms = settings.mcpServers?.oms;
+			if (oms?.args?.[0]) {
+				const serverPath = oms.args[0];
+				const pathOk = existsSync(serverPath);
+				mcpOk = pathOk;
+				mcpDetail = pathOk
+					? `oms MCP → ${serverPath}`
+					: `oms MCP path missing: ${serverPath} (re-run oms setup after nvm/prefix change)`;
+			} else {
+				mcpDetail = 'mcpServers.oms not registered — run oms setup';
+			}
+		} catch (error) {
+			mcpDetail = `settings.json corrupt: ${(error as Error).message}`;
+		}
+	}
+	checks.push({ok: mcpOk, label: 'mcp', detail: mcpDetail});
+
+	// Agents count
+	let agentsOk = false;
+	let agentsDetail = 'sub-agents.json missing';
+	if (existsSync(SUB_AGENTS_PATH)) {
+		try {
+			const data = JSON.parse(readFileSync(SUB_AGENTS_PATH, 'utf-8')) as {
+				agents?: {id?: string}[];
+			};
+			const omsAgents = (data.agents ?? []).filter(
+				a => typeof a.id === 'string' && a.id.startsWith('oms_'),
+			);
+			agentsOk = omsAgents.length === 18;
+			agentsDetail = `${omsAgents.length}/18 oms_* agents`;
+		} catch (error) {
+			agentsDetail = `sub-agents.json corrupt: ${(error as Error).message}`;
+		}
+	}
+	checks.push({ok: agentsOk, label: 'agents', detail: agentsDetail});
+
+	// Skills
+	let skillsOk = false;
+	let skillsDetail = `skills missing at ${SKILLS_TARGET}`;
+	if (existsSync(SKILLS_TARGET)) {
+		const dirs = readdirSync(SKILLS_TARGET, {withFileTypes: true}).filter(d =>
+			d.isDirectory(),
+		);
+		skillsOk = dirs.length >= 10;
+		skillsDetail = `${dirs.length} skill dirs under ${SKILLS_TARGET}`;
+	}
+	checks.push({ok: skillsOk, label: 'skills', detail: skillsDetail});
+
+	// Commands
+	let commandsOk = false;
+	let commandsDetail = `commands missing at ${COMMANDS_TARGET}`;
+	if (existsSync(COMMANDS_TARGET)) {
+		const files = readdirSync(COMMANDS_TARGET).filter(f => f.endsWith('.json'));
+		commandsOk = files.length >= 18;
+		commandsDetail = `${files.length} command json under ${COMMANDS_TARGET}`;
+	}
+	checks.push({ok: commandsOk, label: 'commands', detail: commandsDetail});
+
+	// onStop timeout >= 330000
+	const onStopInstalled = join(GLOBAL_HOOKS_DIR, 'onStop.json');
+	const onStopAsset =
+		packageDir !== null
+			? join(packageDir, 'assets', 'hooks', 'onStop.json')
+			: null;
+	const timeoutPath = existsSync(onStopInstalled)
+		? onStopInstalled
+		: onStopAsset && existsSync(onStopAsset)
+			? onStopAsset
+			: null;
+	const timeout = timeoutPath ? readOnStopTimeout(timeoutPath) : null;
+	const timeoutOk = timeout !== null && timeout >= 330000;
+	checks.push({
+		ok: timeoutOk,
+		label: 'onStop.timeout',
+		detail:
+			timeout === null
+				? 'onStop.json not found or timeout missing — run oms setup'
+				: `timeout=${timeout}ms (need >= 330000; verify is 300000 + buffer)`,
+	});
+
+	// Hook script paths exist (if installed)
+	let hooksPathOk = true;
+	let hooksPathDetail = 'hook configs not installed';
+	if (existsSync(GLOBAL_HOOKS_DIR)) {
+		const hookFiles = readdirSync(GLOBAL_HOOKS_DIR).filter(f =>
+			f.endsWith('.json'),
+		);
+		const missing: string[] = [];
+		for (const f of hookFiles) {
+			try {
+				const rules = JSON.parse(
+					readFileSync(join(GLOBAL_HOOKS_DIR, f), 'utf-8'),
+				) as {hooks?: {command?: string}[]}[];
+				if (!Array.isArray(rules)) continue;
+				for (const rule of rules) {
+					const hooks = rule.hooks;
+					if (!Array.isArray(hooks)) continue;
+					for (const h of hooks) {
+						const cmd = h.command ?? '';
+						const m = cmd.match(/node\s+"?([^"]+\.mjs)"?/);
+						if (m && !existsSync(m[1].replace(/^"|"$/g, ''))) {
+							missing.push(m[1]);
+						}
+					}
+				}
+			} catch {
+				// skip unreadable
+			}
+		}
+		hooksPathOk = missing.length === 0;
+		hooksPathDetail =
+			missing.length === 0
+				? `${hookFiles.length} hook configs; script paths OK`
+				: `missing hook scripts: ${missing.slice(0, 3).join(', ')}`;
+	}
+	checks.push({ok: hooksPathOk, label: 'hook-paths', detail: hooksPathDetail});
+
+	console.log(c.bold('\n  OMS doctor\n'));
+	let failed = 0;
+	for (const check of checks) {
+		const mark = check.ok ? c.green('OK  ') : c.red('FAIL');
+		console.log(`  ${mark} ${check.label.padEnd(16)} ${check.detail}`);
+		if (!check.ok) failed++;
+	}
+	console.log('');
+	if (failed > 0) {
+		console.log(
+			c.yellow(
+				`  ${failed} check(s) failed. Run: npm install -g oh-my-snow && oms setup\n`,
+			),
+		);
+		process.exit(1);
+	}
+	console.log(c.green('  All checks passed.\n'));
+}
+
+function printVersion(): void {
+	const packageDir = findPackageDir();
+	const version = packageDir ? getPackageVersion(packageDir) : 'unknown';
+	console.log(`oh-my-snow ${version}`);
+	if (packageDir) {
+		console.log(packageDir);
+	}
+}
+
 if (isDirectInvocation()) {
 	const command = process.argv[2]?.toLowerCase();
 
@@ -786,6 +1015,14 @@ if (isDirectInvocation()) {
 		case 'uninstall':
 		case 'remove':
 			uninstall();
+			break;
+		case 'doctor':
+			doctor();
+			break;
+		case 'version':
+		case '--version':
+		case '-v':
+			printVersion();
 			break;
 		case 'help':
 		case '--help':
