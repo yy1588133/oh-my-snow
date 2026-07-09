@@ -179,6 +179,12 @@ async function main() {
 				verdict: 'approved',
 				feedback: 'quality ok',
 				reviewerAgentId: 'oms_reviewer',
+				scorecard: JSON.stringify({
+					pass: true,
+					summary: 'quality ok',
+					evidence: ['diff clean'],
+					diffStat: '1 file',
+				}),
 			},
 		});
 		await waitForResponse(startId + 2);
@@ -198,6 +204,11 @@ async function main() {
 				verdict: 'approved',
 				feedback: 'session ok',
 				reviewerAgentId: 'oms_critic',
+				scorecard: JSON.stringify({
+					pass: true,
+					summary: 'session ok',
+					evidence: ['all stories pass'],
+				}),
 			},
 		});
 		await waitForResponse(startId + 4);

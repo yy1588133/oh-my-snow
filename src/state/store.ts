@@ -39,6 +39,7 @@ import {
 	isAllowlistedStrictReviewer,
 	requiresStrictReviewer,
 	isSelfReviewerId,
+	isSelfOnlyGateScope,
 	clearLedgerApproval,
 	type GateScope,
 	type GateScorecard,
@@ -692,6 +693,14 @@ export function setStage(state: OmsState, newStage: Stage): OmsState {
 				', ',
 			)}]`,
 		);
+	}
+	// Returning to executing after verify/done invalidates post-verify gates so
+	// code changes require re-review (review finding #4 / KTD2).
+	if (
+		newStage === 'executing' &&
+		(current === 'verifying' || current === 'done')
+	) {
+		invalidatePostDoneGates();
 	}
 	state.stage = newStage;
 	state.stageHistory.push({
@@ -1754,6 +1763,13 @@ export function requestVerification(
 	scope: VerificationScope,
 	criterionIndex: number | null = null,
 ): VerificationState {
+	// Self-gates must use submit-gate (scorecard matrix). Blocking here closes
+	// the request/submit bypass that skipped validateTaskCompleteScorecard.
+	if (scope === 'task-complete' || scope === 'task-reconcile') {
+		throw new Error(
+			`request-verification does not support scope "${scope}". Use oms-prd action:"submit-gate" with a scorecard instead.`,
+		);
+	}
 	const now = new Date().toISOString();
 	// Detect overwrite of an existing pending request (reviewer M3): only one
 	// pending verification at a time, so a new request silently supersedes the
@@ -1773,6 +1789,9 @@ export function requestVerification(
 			);
 		} catch {}
 	}
+	// Re-request invalidates prior ledger approval for THIS scope only (other
+	// scopes preserved). Prevents stale approved entries after a new review round.
+	clearLedgerApproval(scope as GateScope, storyId);
 	const v: VerificationState = {
 		requestId: randomUUID(),
 		storyId,
@@ -1819,6 +1838,7 @@ export function submitApproval(
 	feedback: string,
 	reviewerAgentId: string,
 	criticTier: string | null = null,
+	scorecardRaw: unknown = null,
 ): SubmitApprovalResult {
 	const v = loadVerificationState();
 	if (!v) {
@@ -1862,26 +1882,34 @@ export function submitApproval(
 		// Don't set status='rejected' here — keep pending so reviewer can retry.
 		// The next submit's max-attempts gate is what finally locks it.
 		saveVerificationState(v);
-		// Atomic bounce to executing for gate scopes when session is verifying.
+		// Always clear this scope's ledger approval on reject (any stage).
+		clearLedgerApproval(v.scope as GateScope, v.storyId);
 		const st = loadState();
-		if (
-			st &&
-			(st.stage === 'verifying' || st.stage === 'done') &&
-			v.scope !== 'story'
-		) {
-			clearLedgerApproval(v.scope as GateScope, v.storyId);
+		if (st && v.scope !== 'story') {
+			// Bounce to executing + invalidate quality/completion so rework re-signs.
+			invalidatePostDoneGates();
 			st.lastGateFailure = {
 				scope: v.scope,
 				summary: feedback || 'gate rejected',
 				reasons: [feedback || 'rejected'],
 				at: new Date().toISOString(),
 			};
-			// Bypass setStage transition validation for reject bounce.
-			st.stage = 'executing';
-			st.stageHistory.push({
-				stage: 'executing',
-				timestamp: new Date().toISOString(),
-			});
+			if (st.stage === 'verifying' || st.stage === 'done') {
+				st.stage = 'executing';
+				st.stageHistory.push({
+					stage: 'executing',
+					timestamp: new Date().toISOString(),
+				});
+			}
+			st.updatedAt = new Date().toISOString();
+			saveState(st);
+		} else if (st && v.scope === 'story') {
+			st.lastGateFailure = {
+				scope: `story:${v.storyId}`,
+				summary: feedback || 'story gate rejected',
+				reasons: [feedback || 'rejected'],
+				at: new Date().toISOString(),
+			};
 			st.updatedAt = new Date().toISOString();
 			saveState(st);
 		}
@@ -1890,6 +1918,24 @@ export function submitApproval(
 	// Strict scopes: block self-approval identities (L1).
 	if (requiresStrictReviewer(v.scope as GateScope)) {
 		if (!isAllowlistedStrictReviewer(reviewerAgentId)) {
+			return {ok: false, reason: 'forbidden'};
+		}
+		// Order hard-gate on submit (not only request): code-quality needs reconcile.
+		if (
+			v.scope === 'code-quality' &&
+			!getLedgerApproval('task-reconcile')
+		) {
+			return {ok: false, reason: 'forbidden'};
+		}
+	}
+
+	// Strict scopes require a real scorecard (KTD5) — no scorecard:null rubber stamps.
+	let card: GateScorecard | null = null;
+	if (requiresStrictReviewer(v.scope as GateScope)) {
+		try {
+			card = parseScorecard(scorecardRaw ?? feedbackScorecardFallback(feedback));
+			assertApprovingScorecard(card, v.scope as GateScope);
+		} catch {
 			return {ok: false, reason: 'forbidden'};
 		}
 	}
@@ -1906,12 +1952,23 @@ export function submitApproval(
 		scope: v.scope as GateScope,
 		storyId: v.storyId,
 		requestId: v.requestId,
-		scorecard: null,
+		scorecard: card,
 		reviewerAgentId,
 		reviewerFeedback: feedback,
 		requestedAt: v.requestedAt,
 	});
 	return {ok: true, verification: v};
+}
+
+/** If client only sent feedback, require it still look like structured evidence for strict gates — prefer explicit scorecard JSON. */
+function feedbackScorecardFallback(feedback: string): GateScorecard {
+	// Deliberately insufficient alone: parseScorecard/assert will fail without evidence fields.
+	// Callers must pass scorecard JSON. This only runs when scorecardRaw is null.
+	return {
+		pass: true,
+		summary: (feedback || '').trim() || 'approved',
+		evidence: [],
+	};
 }
 
 /**
@@ -2003,6 +2060,8 @@ export function clearVerificationOnReject(): void {
 	if (!v) {
 		return; // nothing to clear (过渡期豁免: file doesn't exist)
 	}
+	// Also clear ledger approval for this story/scope (gatesRequired path).
+	clearLedgerApproval(v.scope as GateScope, v.storyId);
 	v.status = 'pending';
 	v.resolvedAt = null;
 	v.reviewerFeedback = null;
@@ -2047,6 +2106,7 @@ export {
 	isAllowlistedStrictReviewer,
 	requiresStrictReviewer,
 	isSelfReviewerId,
+	isSelfOnlyGateScope,
 	type GateScope,
 	type GateScorecard,
 };

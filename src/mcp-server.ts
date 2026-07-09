@@ -1030,7 +1030,7 @@ server.registerTool(
 				.max(20000)
 				.optional()
 				.describe(
-					'JSON scorecard for submit-gate: {pass,summary,evidence[],deferred?,diffStat?,noTasksReason?}',
+					'JSON scorecard for submit-gate OR submit-approval (required for code-quality/completion): {pass,summary,evidence[],deferred?,diffStat?,noTasksReason?}',
 				),
 			requestId: z
 				.string()
@@ -1838,8 +1838,9 @@ server.registerTool(
 									`requestId: ${v.requestId}\n` +
 									`storyId: ${v.storyId ?? '(completion scope)'}\n\n` +
 									`Pass this requestId to the reviewer agent. After review, the reviewer calls:\n` +
-									`  oms-prd action:"submit-approval" requestId:"${v.requestId}" verdict:"approved|rejected" feedback:"..." reviewerAgentId:"<reviewer-id>"\n` +
-									`Once approved, mark-passes (story scope) or oms-set-stage:done (completion scope) will pass the no-approval gate.`,
+									`  oms-prd action:"submit-approval" requestId:"${v.requestId}" verdict:"approved|rejected" feedback:"..." reviewerAgentId:"oms_critic" scorecard:'{"pass":true,"summary":"...","evidence":["..."],"diffStat":"..."}'\n` +
+									`code-quality/completion REQUIRE scorecard + allowlisted reviewer (oms_critic|oms_reviewer|oms_architect). Re-request invalidates prior ledger approval for this scope only.\n` +
+									`Once approved, mark-passes (story) or multi-gate done check may pass.`,
 							},
 						],
 					};
@@ -1896,6 +1897,7 @@ server.registerTool(
 						params.feedback,
 						params.reviewerAgentId,
 						params.criticTier ?? null,
+						params.scorecard ?? null,
 					);
 					if (!result.ok) {
 						// Map the four-gate failure reasons to actionable guidance.
@@ -1906,7 +1908,8 @@ server.registerTool(
 							'max-attempts': 'Too many failed submit-approval attempts (reject count exceeded). Re-request a new verification to reset.',
 							'missing': 'No pending verification exists. Call request-verification first.',
 							'forbidden':
-								'reviewerAgentId is not allowed for this scope (self/main blocked for completion and code-quality). Use oms_critic or oms_reviewer after spawning an independent reviewer.',
+								'reviewerAgentId not allowlisted, scorecard missing/invalid for code-quality|completion, or code-quality without task-reconcile. ' +
+								'Use reviewerAgentId oms_critic|oms_reviewer|oms_architect and scorecard JSON with pass/summary/evidence (diffStat for code-quality).',
 						};
 						return {
 							content: [
@@ -1918,32 +1921,46 @@ server.registerTool(
 							isError: true,
 						};
 					}
+					const stAfter = loadState();
+					const rejectBounce =
+						params.verdict === 'rejected' && stAfter
+							? `\nStage: ${stAfter.stage}` +
+								(stAfter.lastGateFailure
+									? `\nLast gate failure: ${stAfter.lastGateFailure.summary}`
+									: '') +
+								'\nNon-story reject clears ledger approval and bounces verifying/done → executing.'
+							: '';
 					return {
 						content: [
 							{
 								type: 'text' as const,
 								text:
-									`✅ Verification ${result.verification.status}.\n` +
+									`✅ Verification ${result.verification.status === 'approved' ? 'approved' : 'reject recorded (still pending token)'}.\n` +
 									`requestId: ${result.verification.requestId}\n` +
 									`scope: ${result.verification.scope}\n` +
 									`reviewerAgentId: ${result.verification.reviewerAgentId}\n` +
 									`attempts: ${result.verification.attempts}/${result.verification.maxAttempts}\n\n` +
 									(result.verification.status === 'approved'
-										? 'Approval recorded. The no-approval gate will now allow mark-passes / oms-set-stage:done.'
-										: 'Rejection recorded. The verification is reset to pending — re-request and re-review to proceed.'),
+										? 'Approval recorded on ledger. mark-passes / oms-set-stage:done may proceed if all required gates are green.'
+										: 'Rejection recorded.' + rejectBounce),
 							},
 						],
 					};
 				}
 
 				case 'get-pending-verification': {
+					const st = loadState();
 					const v = getPendingVerification();
 					if (!v) {
+						const gatesNote =
+							st?.gatesRequired === true
+								? 'gatesRequired=true: missing pending token does NOT pass stage gates — use submit-gate / request-verification + scorecard approvals. Check oms-get-state Gate ledger.'
+								: 'Legacy session (gatesRequired not set): absent verification-state may still exempt old completion gate.';
 						return {
 							content: [
 								{
 									type: 'text' as const,
-									text: 'No verification-state.json found (过渡期豁免 active — gates pass through). Call request-verification to start the verification flow.',
+									text: `No pending verification-state.json.\n${gatesNote}`,
 								},
 							],
 						};

@@ -211,31 +211,54 @@ async function main() {
 	}
 
 	// Protect OMS control-plane files from agent write bypass (completion-gates KTD8).
+	const args = context.args || context.arguments || {};
+	const hitsOmsStatePath = (p) => {
+		const norm = String(p).replace(/\\/g, '/').toLowerCase();
+		return (
+			norm.includes('/.snow/oms-state/') ||
+			norm.includes('.snow/oms-state/') ||
+			norm.endsWith('.snow/oms-state') ||
+			/(^|\/)oms-state\//.test(norm) ||
+			norm.includes('verification-ledger') ||
+			norm.includes('verification-state.json')
+		);
+	};
 	if (FILE_WRITE_TOOLS.has(toolName)) {
-		const args = context.args || context.arguments || {};
 		const pathCandidates = [
 			args.path,
 			args.filePath,
+			args.file_path,
 			args.file,
 			args.target,
 			args.target_file,
 			typeof args === 'string' ? args : '',
-		]
-			.filter(Boolean)
-			.map(String);
-		const hitsOmsState = pathCandidates.some(p => {
-			const norm = p.replace(/\\/g, '/').toLowerCase();
-			return (
-				norm.includes('/.snow/oms-state/') ||
-				norm.includes('.snow/oms-state/') ||
-				norm.endsWith('.snow/oms-state') ||
-				/(^|\/)oms-state\//.test(norm)
-			);
-		});
-		if (hitsOmsState) {
+		].filter(Boolean);
+		if (pathCandidates.some(hitsOmsStatePath)) {
 			process.stderr.write(
 				`[OMS:BLOCKED] Cannot write under .snow/oms-state/ — gate ledger and session state are MCP-owned.\n` +
 					`Use oms-prd submit-gate / request-verification / submit-approval and oms-set-stage instead.\n`,
+			);
+			process.exit(1);
+		}
+	}
+	// Terminal can rewrite ledger via shell redirect — block high-risk command strings.
+	if (TERMINAL_TOOLS.has(toolName)) {
+		const cmd = String(
+			args.command || args.cmd || args.script || args.input || '',
+		).toLowerCase();
+		if (
+			cmd &&
+			(/\.snow[\\/]+oms-state/.test(cmd) ||
+				cmd.includes('verification-ledger') ||
+				cmd.includes('verification-state.json') ||
+				(/oms-state/.test(cmd) &&
+					(/>|>>|out-file|set-content|add-content|tee |copy |move |rm |del |remove-item/.test(
+						cmd,
+					))))
+		) {
+			process.stderr.write(
+				`[OMS:BLOCKED] terminal-execute must not write/delete .snow/oms-state (including verification-ledger).\n` +
+					`Gate state is MCP-owned. Use oms-prd / oms-set-stage tools instead.\n`,
 			);
 			process.exit(1);
 		}

@@ -226,17 +226,18 @@ export function isSelfReviewerId(id: string): boolean {
 export function isAllowlistedStrictReviewer(id: string): boolean {
 	const n = (id || '').trim().toLowerCase();
 	if (!n || isSelfReviewerId(n)) return false;
-	return (
-		n.startsWith('oms_critic') ||
-		n.startsWith('oms_reviewer') ||
-		n.startsWith('oms_architect') ||
-		n.startsWith('team:') ||
-		n.startsWith('#oms_critic') ||
-		n.startsWith('#oms_reviewer') ||
-		n.startsWith('#oms_architect') ||
-		n.includes('critic') ||
-		n.includes('reviewer') ||
-		n.includes('architect')
+	// Prefix/exact allowlist only — no substring includes() (review P1).
+	if (n.startsWith('team:')) return true;
+	const prefixes = [
+		'oms_critic',
+		'oms_reviewer',
+		'oms_architect',
+		'#oms_critic',
+		'#oms_reviewer',
+		'#oms_architect',
+	];
+	return prefixes.some(
+		p => n === p || n.startsWith(p + '-') || n.startsWith(p + '_'),
 	);
 }
 
@@ -269,7 +270,7 @@ export function parseScorecard(raw: unknown): GateScorecard {
 	if (!Array.isArray(obj.evidence)) {
 		throw new Error('scorecard.evidence must be an array');
 	}
-	const evidence = obj.evidence.map(String);
+	const evidence = obj.evidence.map(String).map(s => s.trim()).filter(Boolean);
 	const card: GateScorecard = {
 		pass: obj.pass,
 		summary: String(obj.summary).trim(),
@@ -312,12 +313,15 @@ export function assertApprovingScorecard(
 		);
 	}
 	if (scope === 'code-quality') {
+		const ds = (card.diffStat || '').trim();
 		const hasDiff =
-			(card.diffStat && card.diffStat.trim()) ||
-			card.evidence.some(e => /diff|stat|file|line|test|build/i.test(e));
+			ds.length > 0 ||
+			card.evidence.some(e =>
+				/\b(diff|git\s+diff|diffstat|build|npm\s+test|test\s+exit)\b/i.test(e),
+			);
 		if (!hasDiff) {
 			throw new Error(
-				'code-quality scorecard needs diffStat or evidence mentioning diff/test/build',
+				'code-quality scorecard needs non-empty diffStat or evidence mentioning diff/build/test results',
 			);
 		}
 	}
@@ -459,15 +463,38 @@ export function canEnterDone(gatesRequired: boolean): {
 		return {ok: true, reason: ''};
 	}
 	const missing: string[] = [];
-	if (!getLedgerApproval('task-reconcile')) missing.push('task-reconcile');
-	if (!getLedgerApproval('code-quality')) missing.push('code-quality');
-	if (!getLedgerApproval('completion')) missing.push('completion');
-	if (missing.length === 0) return {ok: true, reason: ''};
+	const bad: string[] = [];
+	for (const scope of ['task-reconcile', 'code-quality', 'completion'] as GateScope[]) {
+		const e = getLedgerApproval(scope);
+		if (!e) {
+			missing.push(scope);
+			continue;
+		}
+		// Strict gates must carry a real scorecard (blocks scorecard:null rubber stamps).
+		if (
+			(scope === 'code-quality' || scope === 'completion') &&
+			(!e.scorecard || e.scorecard.pass !== true)
+		) {
+			bad.push(`${scope} (missing valid scorecard)`);
+		}
+	}
+	if (missing.length === 0 && bad.length === 0) return {ok: true, reason: ''};
+	const parts = [
+		missing.length ? `missing approved gates: ${missing.join(', ')}` : '',
+		bad.length ? `invalid: ${bad.join(', ')}` : '',
+	]
+		.filter(Boolean)
+		.join('; ');
 	return {
 		ok: false,
 		reason:
-			`Cannot transition to done — missing approved gates: ${missing.join(', ')}\n` +
+			`Cannot transition to done — ${parts}\n` +
 			`Order: task-reconcile → code-quality → completion (independent critic), then oms-set-stage done.\n` +
 			`Ledger:\n${formatLedgerSummary()}`,
 	};
+}
+
+/** Scopes that must use submit-gate, not request-verification. */
+export function isSelfOnlyGateScope(scope: string): boolean {
+	return scope === 'task-complete' || scope === 'task-reconcile';
 }

@@ -158,6 +158,12 @@ async function runTests() {
 	});
 	const rCq = await waitForResponse(15);
 	const cqId = (rCq?.result?.content?.[0]?.text ?? '').match(/requestId: ([a-f0-9-]+)/)?.[1];
+	const qualityCard = JSON.stringify({
+		pass: true,
+		summary: 'quality ok',
+		evidence: ['npm test green'],
+		diffStat: '2 files changed',
+	});
 	send('tools/call', {
 		name: 'oms-prd',
 		arguments: {
@@ -166,6 +172,7 @@ async function runTests() {
 			verdict: 'approved',
 			feedback: 'quality ok',
 			reviewerAgentId: 'oms_reviewer',
+			scorecard: qualityCard,
 		},
 	});
 	await waitForResponse(16);
@@ -183,6 +190,11 @@ async function runTests() {
 			verdict: 'approved',
 			feedback: 'session complete',
 			reviewerAgentId: 'oms_critic',
+			scorecard: JSON.stringify({
+				pass: true,
+				summary: 'session complete',
+				evidence: ['all gates green'],
+			}),
 		},
 	});
 	await waitForResponse(18);

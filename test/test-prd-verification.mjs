@@ -217,7 +217,20 @@ async function setupVerifiedStory(dir) {
 	]);
 	const v = store.requestVerification(null, 'completion');
 	ok('10. request(null, completion) → storyId=null', v.storyId === null && v.scope === 'completion');
-	store.submitApproval(v.requestId, 'approved', 'whole session ok', 'architect-001');
+	// Strict scope needs allowlisted reviewer + scorecard
+	const card = {
+		pass: true,
+		summary: 'whole session ok',
+		evidence: ['criteria met'],
+	};
+	store.submitApproval(
+		v.requestId,
+		'approved',
+		'whole session ok',
+		'oms_architect',
+		null,
+		card,
+	);
 	const allowed = store.hasMatchingApproval(null, 'completion');
 	ok('10. completion approved → hasMatchingApproval(null,completion)=true', allowed === true);
 }
@@ -292,7 +305,14 @@ async function setupVerifiedStory(dir) {
 	]);
 	// completion-scope approved
 	const vc = store.requestVerification(null, 'completion');
-	store.submitApproval(vc.requestId, 'approved', 'session ok', 'architect-001');
+	store.submitApproval(
+		vc.requestId,
+		'approved',
+		'session ok',
+		'oms_architect',
+		null,
+		{pass: true, summary: 'session ok', evidence: ['ok']},
+	);
 	// story auto-lift/mark-passes 应被拦 (scope 不匹配: completion 不能用于 story)
 	const storyAllowed = store.hasMatchingApproval('US-001', 'story');
 	ok('14. R6: completion-scope approved 不放行 story gate', storyAllowed === false);

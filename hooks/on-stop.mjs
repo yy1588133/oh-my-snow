@@ -195,7 +195,7 @@ You are the TEAM LEAD in the verifying stage. Merge teammate work.
    - On conflict: snow-cli AI resolves it (manual/theirs/ours/auto)
 2. Verification (build/test) runs AUTOMATICALLY after this turn (see build result below)
    - If build failed: call oms-set-stage { stage: "executing" } to fix (lead self-fix or re-spawn)
-   - If build passed: call oms-set-stage { stage: "done" }
+   - If build passed: complete task-reconcile + code-quality + completion gates, then oms-set-stage { stage: "done" } (oral done blocked)
 3. Before re-spawning teammates after a failed verify: check worktree state
    - If cleanup_team already ran: re-spawn creates fresh worktrees
    - If not: createTeamWorktree reuses old worktree — clean dirty changes with git checkout first

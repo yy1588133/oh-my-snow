@@ -85,6 +85,53 @@ ok('canEnterDone mentions missing', /missing|code-quality|completion/i.test(d1.r
 // 8. self reviewer blocked helpers
 ok('main is self', store.isSelfReviewerId('main') === true);
 ok('oms_critic allowlisted', store.isAllowlistedStrictReviewer('oms_critic') === true);
+ok('substring reviewer NOT allowlisted', store.isAllowlistedStrictReviewer('bot-reviewer') === false);
+
+// 9. request-verification rejects self-gate scopes
+let threw = false;
+try {
+	store.requestVerification(null, 'task-complete');
+} catch {
+	threw = true;
+}
+ok('request-verification task-complete throws', threw === true);
+
+// 10. re-request invalidates ledger for that scope
+store.createState('re-req', 'npm test');
+store.approveSelfGate({
+	scope: 'task-reconcile',
+	scorecard: {pass: true, summary: 'r', evidence: ['e']},
+});
+const rq = store.requestVerification(null, 'code-quality');
+// code-quality ledger should not exist yet; task-reconcile preserved
+ok('reconcile preserved after other request', store.getLedgerApproval('task-reconcile') != null);
+// approve quality with scorecard
+const sub = store.submitApproval(
+	rq.requestId,
+	'approved',
+	'q',
+	'oms_reviewer',
+	null,
+	{pass: true, summary: 'q', evidence: ['diff'], diffStat: '1 file'},
+);
+ok('code-quality submit with scorecard', sub.ok === true);
+// re-request code-quality clears that ledger entry
+store.requestVerification(null, 'code-quality');
+ok('re-request clears code-quality ledger', store.getLedgerApproval('code-quality') == null);
+ok('reconcile still after re-request quality', store.getLedgerApproval('task-reconcile') != null);
+
+// 11. reject bounces stage
+const s2 = store.createState('reject-bounce', 'npm test');
+store.setStage(s2, 'executing');
+const st2 = store.loadState();
+store.setStage(st2, 'verifying');
+const rq2 = store.requestVerification(null, 'completion');
+// need reconcile for canEnterDone later — just reject completion
+const rej = store.submitApproval(rq2.requestId, 'rejected', 'not done', 'oms_critic');
+ok('reject ok', rej.ok === true);
+const after = store.loadState();
+ok('reject bounces to executing', after.stage === 'executing');
+ok('lastGateFailure set', !!after.lastGateFailure);
 
 // cleanup
 try {

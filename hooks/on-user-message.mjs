@@ -63,7 +63,7 @@ Instructions:
 - Run tests and verify correctness
 - DO NOT edit files — verification only
 - If issues are found, call oms-set-stage { stage: "executing" } to fix them
-- If everything passes, call oms-set-stage { stage: "done" }`;
+- If everything looks good: submit task-reconcile + code-quality + completion gates, then oms-set-stage { stage: "done" } (blocked without ledger approvals)`;
 
 		case 'done':
 			return `[OMS:DONE]
