@@ -280,7 +280,7 @@ function runVerification(state) {
 	// validates on input, but a stored command could have been tampered with
 	// on disk or set by a legacy state.json. This is the last line of defense
 	// before execSync(verifyCmd, { shell: true }).
-	if (/[;`$]/.test(verifyCmd) || verifyCmd.includes('\n') || /\b&(?!\s*&)/.test(verifyCmd)) {
+	if (/[;`$]/.test(verifyCmd) || verifyCmd.includes('\n') || verifyCmd.replace(/&&/g, '').includes('&')) {
 		if (markerExists) {
 			try { unlinkSync(markerPath); } catch {}
 		}
@@ -303,15 +303,30 @@ function runVerification(state) {
 		});
 		// Build succeeded — no error prefix
 	} catch (error) {
-		const buildError = error.stderr || error.stdout || error.message || 'Unknown build error';
-		const truncated = buildError.length > 2000 ? '...\n' + buildError.slice(-2000) : buildError;
-		buildErrorPrefix =
-			`[OMS:BUILD FAILED] Auto-verification command: "${verifyCmd}"\n\n` +
-			`The build/test check failed after your edits.\n` +
-			`You must fix the build errors before proceeding.\n\n` +
-			`Build output:\n${truncated}\n\n` +
-			`Fix the errors above.\n` +
-			`If you're in the "verifying" stage, switch back to executing: oms-set-stage { stage: "executing" }\n\n`;
+		// Distinguish timeout from build failure: execSync sets error.killed
+		// and error.signal when the timeout fires. Without this check the AI
+		// receives "BUILD FAILED" and tries to fix code, when the real issue
+		// is a hung test/process that needs to be killed, not debugged.
+		if (error.killed || error.signal === 'SIGTERM') {
+			buildErrorPrefix =
+				`[OMS:VERIFY TIMEOUT] Auto-verification command timed out after 300s.\n` +
+				`Command: "${verifyCmd}"\n\n` +
+				`The command did not finish within the 5-minute timeout. This usually means:\n` +
+				`  - A test or process is hung (deadlock, infinite loop, waiting for input)\n` +
+				`  - A dev server was started and never exited\n\n` +
+				`Check for hung processes. If the command genuinely needs more time,\n` +
+				`consider splitting it into smaller verification steps.\n\n`;
+		} else {
+			const buildError = error.stderr || error.stdout || error.message || 'Unknown build error';
+			const truncated = buildError.length > 2000 ? '...\n' + buildError.slice(-2000) : buildError;
+			buildErrorPrefix =
+				`[OMS:BUILD FAILED] Auto-verification command: "${verifyCmd}"\n\n` +
+				`The build/test check failed after your edits.\n` +
+				`You must fix the build errors before proceeding.\n\n` +
+				`Build output:\n${truncated}\n\n` +
+				`Fix the errors above.\n` +
+				`If you're in the "verifying" stage, switch back to executing: oms-set-stage { stage: "executing" }\n\n`;
+		}
 	}
 
 	// Clean up marker (always, even on failure)

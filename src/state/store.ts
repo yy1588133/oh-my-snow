@@ -144,6 +144,10 @@ function getVerifyCommandFilePath(): string {
  * Blocked: command separators (; &), command substitution ($() ``), newlines,
  * and background execution (&). These enable stealthy command injection.
  *
+ * The single-& check strips all && first, then looks for a residual &.
+ * This avoids the word-boundary (\b) trap: & is not a word character, so
+ * \b& fails to match the most common injection "cmd & evil" (space before &).
+ *
  * @throws Error if the command contains dangerous shell metacharacters
  */
 export function validateVerifyCommand(cmd: string): void {
@@ -154,7 +158,12 @@ export function validateVerifyCommand(cmd: string): void {
 	// $ — variable/parameter expansion ($() ${})
 	// newline — command separator
 	// & (when not part of &&) — background execution
-	const hasDangerous = /[;`$]/.test(cmd) || cmd.includes('\n') || /\b&(?!\s*&)/.test(cmd);
+	// Strip all && first so a legit "a && b" doesn't trip the check, then
+	// any remaining & is a background-execution injection.
+	const hasDangerous =
+		/[;`$]/.test(cmd) ||
+		cmd.includes('\n') ||
+		cmd.replace(/&&/g, '').includes('&');
 	if (hasDangerous) {
 		throw new Error(
 			`Verify command contains potentially dangerous shell metacharacters. ` +
@@ -255,6 +264,76 @@ function syncSleep(ms: number): void {
 		const start = Date.now();
 		while (Date.now() - start < ms) {
 			// spin
+		}
+	}
+}
+
+/**
+ * Acquire a file lock, run `fn`, and release the lock in a finally block.
+ * Returns the result of `fn`, or `undefined` if the lock could not be acquired.
+ *
+ * This is the primitive that enables read-modify-write under mutual exclusion:
+ * the caller reads the file, modifies it, and writes it back — all while
+ * holding the lock, so no other process can interleave a write between the
+ * read and the write (closing the TOCTOU window).
+ *
+ * Stale lock detection matches atomicWriteWithLock (120s threshold).
+ *
+ * @param filePath  — the data file path (lock is `<filePath>.lock`)
+ * @param fn        — callback that runs while the lock is held
+ * @param dirOverride — mkdir this dir instead of the OMS state dir
+ * @returns the return value of `fn`, or `undefined` if lock acquisition failed
+ */
+function withFileLock<T>(
+	filePath: string,
+	fn: () => T,
+	dirOverride?: string,
+): T | undefined {
+	if (dirOverride) {
+		mkdirSync(dirOverride, {recursive: true});
+	} else {
+		ensureStateDir();
+	}
+	const lockPath = filePath + '.lock';
+
+	const STALE_LOCK_MS = 120000;
+	if (existsSync(lockPath)) {
+		try {
+			const lockStat = statSync(lockPath);
+			if (Date.now() - lockStat.mtimeMs > STALE_LOCK_MS) {
+				unlinkSync(lockPath);
+			}
+		} catch {}
+	}
+
+	let lockCreated = false;
+	const MAX_RETRIES = 5;
+	const RETRY_DELAY_MS = 50;
+
+	for (let attempt = 0; attempt < MAX_RETRIES; attempt++) {
+		try {
+			const fd = openSync(lockPath, 'wx');
+			closeSync(fd);
+			lockCreated = true;
+			break;
+		} catch {
+			if (attempt < MAX_RETRIES - 1) {
+				syncSleep(RETRY_DELAY_MS);
+			}
+		}
+	}
+
+	if (!lockCreated) {
+		return undefined;
+	}
+
+	try {
+		return fn();
+	} finally {
+		if (lockCreated) {
+			try {
+				unlinkSync(lockPath);
+			} catch {}
 		}
 	}
 }
@@ -477,13 +556,22 @@ function escapeRegex(s: string): string {
 
 export function deleteState(): void {
 	const filePath = getStateFilePath();
+	// Each cleanup step is independently wrapped so that a failure on one
+	// (file locked, permission denied, Windows file-in-use) does NOT skip
+	// the remaining cleanup. Without this, a locked state.json would leave
+	// verify.cmd, .pending-verify, lock/tmp files, and verification-state.json
+	// all dangling — confusing the next oms-start.
 	if (existsSync(filePath)) {
-		unlinkSync(filePath);
+		try {
+			unlinkSync(filePath);
+		} catch {}
 	}
 	// Also clean up verify.cmd if present
 	const verifyPath = getVerifyCommandFilePath();
 	if (existsSync(verifyPath)) {
-		unlinkSync(verifyPath);
+		try {
+			unlinkSync(verifyPath);
+		} catch {}
 	}
 	// Clean up pending-verify marker (may be left over from abnormal termination)
 	const markerPath = join(getStateDir(), '.pending-verify');
@@ -602,45 +690,54 @@ export function completeTask(state: OmsState, taskId: string): OmsState {
  */
 export function setProjectTeamMode(enabled: boolean): boolean {
 	const settingsPath = join(process.cwd(), '.snow', 'settings.json');
+	const settingsDir = dirname(settingsPath);
 
-	// Read existing settings (empty object if missing — preserves other fields)
-	let settings: Record<string, unknown> = {};
-	if (existsSync(settingsPath)) {
-		try {
-			settings = JSON.parse(readFileSync(settingsPath, 'utf-8')) as Record<string, unknown>;
-		} catch (error) {
-			// Corrupt settings.json — refuse to overwrite, as writing {} would destroy
-			// the user's entire configuration (MCP servers, hooks, etc.). Throw so the
-			// caller can surface the error and the user can fix settings.json manually.
-			throw new Error(
-				`settings.json is corrupt and cannot be parsed: ${(error as Error).message}. ` +
-				`Refusing to overwrite — fix or delete .snow/settings.json manually, then retry.`,
-			);
-		}
-	}
-
-	// Idempotent: skip the write if already in the desired state
-	if (settings.teamMode === enabled) {
-		return false;
-	}
-
-	settings.teamMode = enabled;
-
-	// Atomic write via the shared lock+tmp+rename primitive (skip on contention —
-	// the AI can retry oms-set-team; never corrupt settings.json with a torn write).
-	const content = JSON.stringify(settings, null, 2);
-	const wrote = atomicWriteWithLock(
+	// Read-modify-write UNDER the lock to close the TOCTOU window.
+	// Previously the read happened outside the lock: another process could
+	// write settings.json between our read and our locked write, and our
+	// write would silently overwrite their change. Now the entire RMW
+	// sequence is serialized by the lock.
+	const result = withFileLock(
 		settingsPath,
-		content,
-		'skip',
-		dirname(settingsPath),
+		() => {
+			// Read existing settings (empty object if missing — preserves other fields)
+			let settings: Record<string, unknown> = {};
+			if (existsSync(settingsPath)) {
+				try {
+					settings = JSON.parse(readFileSync(settingsPath, 'utf-8')) as Record<string, unknown>;
+				} catch (error) {
+					// Corrupt settings.json — refuse to overwrite, as writing {} would destroy
+					// the user's entire configuration (MCP servers, hooks, etc.). Throw so the
+					// caller can surface the error and the user can fix settings.json manually.
+					throw new Error(
+						`settings.json is corrupt and cannot be parsed: ${(error as Error).message}. ` +
+							`Refusing to overwrite — fix or delete .snow/settings.json manually, then retry.`,
+					);
+				}
+			}
+
+			// Idempotent: skip the write if already in the desired state
+			if (settings.teamMode === enabled) {
+				return false;
+			}
+
+			settings.teamMode = enabled;
+
+			// Write while still holding the lock — tmp+rename keeps the file
+			// atomic, and the lock ensures no other process interleaves a write.
+			const content = JSON.stringify(settings, null, 2);
+			return tmpRenameWrite(settingsPath, content);
+		},
+		settingsDir,
 	);
-	if (!wrote) {
+
+	if (result === undefined) {
+		// Lock contention — another process holds the lock.
 		console.error('[OMS] setProjectTeamMode: lock contention, skipping write');
 		return false;
 	}
 
-	return true;
+	return result;
 }
 
 /**
@@ -798,18 +895,40 @@ function atomicWriteFile(filePath: string, content: string): void {
 	atomicWriteWithLock(filePath, content, 'force');
 }
 
-/** Load the PRD. Returns null if no PRD file exists. */
+/**
+ * Load the PRD. Returns null if no PRD file exists.
+ *
+ * Retries once on transient read errors (SyntaxError from a partial JSON write
+ * via the cross-device fallback in tmpRenameWrite). This mirrors the retry
+ * logic in hooks/lib/oms-state.mjs loadPrd — the two run in separate processes
+ * (compiled TS MCP server vs. runtime .mjs hooks) and cannot share imports,
+ * so the logic is intentionally duplicated to keep behavior identical.
+ *
+ * Does NOT retry on ENOENT (file deleted mid-read — not transient).
+ */
 export function loadPrd(): Prd | null {
 	const filePath = getPrdFilePath();
 	if (!existsSync(filePath)) {
 		return null;
 	}
-	try {
-		const content = readFileSync(filePath, 'utf-8');
-		return JSON.parse(content) as Prd;
-	} catch {
-		return null;
+	for (let attempt = 0; attempt < 2; attempt++) {
+		try {
+			const content = readFileSync(filePath, 'utf-8');
+			return JSON.parse(content) as Prd;
+		} catch (error) {
+			// ENOENT between existsSync and readFileSync means the file was
+			// deleted mid-read (e.g. deletePrd during oms-stop) — not transient.
+			if (error && (error as NodeJS.ErrnoException).code === 'ENOENT') {
+				return null;
+			}
+			// SyntaxError (partial JSON from cross-device fallback) or other
+			// transient read error — retry once after a short sleep.
+			if (attempt === 0) {
+				syncSleep(20);
+			}
+		}
 	}
+	return null;
 }
 
 function savePrd(prd: Prd): void {

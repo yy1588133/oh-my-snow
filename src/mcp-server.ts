@@ -81,7 +81,7 @@ server.registerTool(
 		description:
 			'Initialize an OMS orchestration session. Creates state.json and enters the "planning" stage. Call this first before any other oms-* tools.',
 		inputSchema: {
-			goal: z.string().max(2000).describe('The high-level goal the AI should accomplish'),
+			goal: z.string().min(1).max(2000).describe('The high-level goal the AI should accomplish'),
 			verifyCommand: z
 				.string()
 				.max(500)
@@ -332,6 +332,7 @@ server.registerTool(
 		inputSchema: {
 			description: z
 				.string()
+				.min(1)
 				.max(2000)
 				.describe('Clear, actionable description of the task'),
 		},
