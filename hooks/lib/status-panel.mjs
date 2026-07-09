@@ -277,9 +277,11 @@ export function buildHardStopReport(ctx, opts = {}) {
 		`${lgf}\n` +
 		`${verifyLine}\n` +
 		`${prdLine}\n\n` +
+		`Handoff: ${opts.handoffLine || 'not written this stop'}\n` +
 		`Suggested next:\n` +
+		`  - /oms:resume     (preview then confirm — progress + gates only, NOT chat history)\n` +
 		`  - oms-get-state  (inspect)\n` +
-		`  - oms-stop       (cleanup)\n` +
-		`  - /oms:goal …   (fresh session if still needed)\n`
+		`  - oms-stop       (cleanup session; handoff.json is kept for resume)\n` +
+		`  - /oms:goal …   (fresh session only if you abandon progress)\n`
 	);
 }

@@ -28,6 +28,7 @@ import {
 	buildHardStopReport,
 } from './lib/status-panel.mjs';
 import { buildContinuationPrompt } from './lib/continuation-prompt.mjs';
+import { writeHandoffFromState } from './lib/handoff.mjs';
 
 // ── Git diff detection ──
 
@@ -274,7 +275,22 @@ async function main() {
 
 	// Hard stop: end the conversation. Do NOT set stage=done or clear state.
 	if (state.turnCount > hardMax) {
-		process.stderr.write(buildHardStopReport(panelCtx));
+		let handoffLine = 'unavailable';
+		try {
+			const hw = writeHandoffFromState(state, {
+				reason: 'hard_ceiling',
+				prdSummary: null,
+				verifyNote: null,
+			});
+			handoffLine = hw.ok
+				? `written (${hw.path})`
+				: `unavailable (${hw.error || 'write failed'})`;
+		} catch (e) {
+			handoffLine = `unavailable (${e instanceof Error ? e.message : String(e)})`;
+		}
+		process.stderr.write(
+			buildHardStopReport(panelCtx, {handoffLine}),
+		);
 		process.exit(0);
 	}
 

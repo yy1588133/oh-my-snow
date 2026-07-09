@@ -1,0 +1,7 @@
+{
+  "name": "oms:resume",
+  "command": "You are resuming an OMS session after a **hard-stop handoff** (or leftover active state).\n\n## Hard rules\n- Handoff is **NOT a time machine**: restore **goal / stage / tasks / completion gates only** — never claim to restore full chat history.\n- **Two steps required:** (1) preview (2) user confirms (3) then confirm. Never call confirm without explicit user approval in this conversation.\n- Do **not** tell the user to `oms-stop` then `oms-start` — that destroys progress. Resume is the correct path.\n\n## Step 1 — Preview (read-only)\nCall MCP tool `oms-resume` with `action: \"preview\"`.\nShow the full preview text to the user, including any **STALE** warning.\n\n## Step 2 — Ask user\nUse askuser-ask_question (or clear yes/no) with options like:\n- Confirm resume (reset turns to 0, soft/hard defaults)\n- Cancel\n\n## Step 3 — Confirm only if user approved\nCall `oms-resume` with `action: \"confirm\"`.\nThen call `oms-get-state` and continue the orchestration loop at the restored stage under completion gates.\n\n## If preview fails\nExplain the error and suggest `/oms:auto <goal>` for a fresh start only if there is truly nothing to resume.\n\n$ARGUMENTS",
+  "type": "prompt",
+  "description": "硬停后两步续跑：先 preview 交班摘要，用户确认后再恢复进度与门（不续聊天）。用法: /oms:resume",
+  "argsHint": ""
+}

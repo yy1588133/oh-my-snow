@@ -27,7 +27,8 @@ OMS wraps Snow CLI with a state machine, stage enforcement, auto-verification, a
 - 🎓 **Learning** — Extract reusable patterns from sessions into SKILL.md files
 - 🤖 **18 specialized sub-agents** — Architecture, security, testing, research, and more, each with a structured `role` prompt ported from oh-my-claudecode (Role / Success Criteria / Constraints / Investigation Protocol / Final Checklist)
 - 📚 **10 skills** — Knowledge base wiki, evidence-driven trace, ambiguity-gated interview, two-stage dive, visual-verdict QA, cleanup, research, learn, ralph, plan, and more
-- 🛠️ **18 commands** — 10 workflow commands (auto, plan, qa, goal, verify, release, save, stop, team, help) + 8 skill-mapping commands (interview, dive, trace, cleanup, vverify, wiki, research, learn)
+- 🛠️ **19 commands** — 11 workflow commands (auto, plan, qa, goal, verify, release, save, stop, resume, team, help) + 8 skill-mapping commands (interview, dive, trace, cleanup, vverify, wiki, research, learn)
+- 📦 **Hard-stop handoff** — when turn hard cap hits, writes `handoff.json`; `/oms:resume` previews then restores progress + gates (not chat)
 
 ## Installation
 
@@ -50,7 +51,7 @@ Equivalent package entry: `oh-my-snow` (same CLI as `oms`).
 1. Registers the MCP server in `~/.snow/settings.json`
 2. Merges 18 sub-agents into `~/.snow/sub-agents.json`
 3. Copies 10 skills to `~/.snow/skills/oms/`
-4. Copies 18 commands to `~/.snow/commands/oms/` (10 workflow + 8 skill mappings)
+4. Copies 19 commands to `~/.snow/commands/oms/` (11 workflow + 8 skill mappings)
 5. Installs 4 hook configs to `~/.snow/hooks/` (global, with absolute path commands pointing to the npm package)
 6. Creates `<project>/.snow/oms-state/` for session state (auto-created per project at runtime)
 
@@ -102,7 +103,7 @@ OMS consists of **two systems** working together:
 
 ### System 1: MCP Server (State Management)
 
-A stdio MCP server with 11 tools that manage the orchestration state file (`.snow/oms-state/state.json`) and skill state store (`.snow/oms-state/store/<mode>.json`). The AI calls these tools to start sessions, add tasks, transition stages, save snapshots, persist skill state, and learn patterns.
+A stdio MCP server with 12 tools that manage the orchestration state file (`.snow/oms-state/state.json`) and skill state store (`.snow/oms-state/store/<mode>.json`). The AI calls these tools to start sessions, add tasks, transition stages, save snapshots, resume hard-stop handoffs, persist skill state, and learn patterns.
 
 ### System 2: Hooks (4 Lifecycle Hooks)
 
@@ -174,6 +175,7 @@ Legacy sessions without `gatesRequired` keep the older completion-approval exemp
 | `/oms:release <context>`  | Release flow — version bump, changelog, git tag                                                |
 | `/oms:save <context>`     | Save session memory — snapshot state and extract reusable patterns                             |
 | `/oms:stop`               | Stop the active OMS session                                                                    |
+| `/oms:resume`             | After hard-stop: preview handoff → user confirms → restore progress + gates (not chat history) |
 | `/oms:help`               | Show the full OMS usage guide                                                                  |
 
 ### Skill-Mapping Commands
@@ -207,7 +209,8 @@ Each maps to a skill via the `skill-execute` tool — equivalent to `/skill oms/
 | `oms-learn`         | Extract reusable patterns and orchestrate skill evolution cycle                                      |
 | `oms-prd`           | Ralph PRD + **gates**: `submit-gate`, `request-verification`, `submit-approval` (scorecard required for code-quality/completion) |
 | `oms-state`         | Generic key-value state store for skills (mirrors omc state_write/state_read; `.snow/oms-state/store/<mode>.json`) |
-| `oms-stop`          | End the orchestration session and clean up state                                                     |
+| `oms-stop`          | End the orchestration session and clean up state (keeps `handoff.json` for resume)                  |
+| `oms-resume`        | Preview or confirm hard-stop handoff restore (progress + gates only, not chat)                       |
 
 #### Gate-related `oms-prd` actions
 
@@ -392,7 +395,7 @@ Published package includes: `dist/`, `assets/`, `hooks/`, `README.md`, `LICENSE`
 ```
 oh-my-snow/
 ├── src/
-│   ├── mcp-server.ts          # MCP server with 11 tools (incl. oms-state skill state store)
+│   ├── mcp-server.ts          # MCP server with 12 tools (incl. oms-resume, oms-state store)
 │   ├── installer.ts           # CLI: setup / uninstall / doctor / version / help
 │   ├── i18n/                  # Installer translations (en, zh, zh-TW)
 │   └── state/
