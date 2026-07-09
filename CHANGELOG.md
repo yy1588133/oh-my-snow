@@ -1,5 +1,28 @@
 # Changelog
 
+## 0.4.0 — 2026-07-10
+
+### Added
+
+- **硬停交班包（handoff）**：`turnCount` 越过 hard 上限时，除完整体检外自动写入 `.snow/oms-state/handoff.json`（目标、stage、任务、轮次、gates/ledger 快照、git 锚点等）。写失败时硬停文案仍发出并标明交班不可用。
+- **`/oms:resume` 两步续跑**：`oms-resume` preview（只读摘要 + 陈旧工作树警告）→ 用户确认后 confirm，恢复进度与完成门，**不恢复聊天**。
+- **轮次重置（R6b）**：确认后续后 `turnCount=0`，soft/hard 恢复默认 50/200，文案写明新配额。
+- **交班可跨 stop**：`oms-stop` / `deleteState` **保留** `handoff.json`，避免「接不上 vs 清光进度」二选一。
+
+### Fixed / Hardened
+
+- **会话绑定**：Path A（续活 live）仅当 handoff 与 live `sessionId` 一致；跨会话冲突拒绝，禁止外源 ledger 灌入新会话。
+- **确认后消费 handoff**：成功 confirm 后删除 `handoff.json`，避免永久毒化后续会话。
+- **过夜门 TTL**：续跑时 `refreshLedgerForResume` 刷新已批准门时间戳，避免 2h TTL 静默丢门。
+- **Preview 信息完整**：展示 Confirm path、门 ok/missing、轮次快照、PRD/verify 要点（有则写入）。
+- **Path B 清残留**：从 handoff 重建前先 `deleteState`（仍保留 handoff 直至消费完毕）；`done→executing` 重映射时作废 post-done 门。
+
+### Docs / Tests
+
+- README：`/oms:resume`、`oms-resume`、硬停 handoff 说明。
+- `/oms:help`：补 resume 命令与 hard-stop 交班说明（本版本同步）。
+- 新增 `test/test-handoff.mjs`、`test/test-resume.mjs`；计划文档 `docs/plans/2026-07-09-005-feat-hard-stop-handoff-resume-plan.md`。
+
 ## 0.3.0 — 2026-07-09
 
 ### Added
