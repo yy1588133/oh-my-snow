@@ -1,5 +1,12 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- **有界 GCF 金牌配方**：`/oms:gcf` + skill `oms/gcf` — 对已有改动做独立 `#oms_critic` 挑刺 → Fix 对账；默认 maxRounds=3；无 open P0/P1 为 dry；撞帽 `hitCeiling` 诚实失败；可选完成门 evidence 文案，不自动过门。
+- 契约测试 `test/test-gcf-recipe.mjs`。
+
 ## 0.4.0 — 2026-07-10
 
 ### Added
