@@ -1,0 +1,7 @@
+{
+  "name": "oms:gcf",
+  "command": "Load the \"gcf\" skill by calling the `skill-execute` tool with `{ \"skill\": \"oms/gcf\" }`, then follow the skill's SKILL.md instructions for a **bounded GCF** (Generate=lock scope → Critique → Fix) on existing changes or the target below.\n\nHard product rules (also in the skill — do not violate):\n- Default is Critique→Fix on **existing** work (git diff / args), not greenfield Generate.\n- maxRounds = 3; dry only when no open P0/P1; hitCeiling is honest failure (no fake success).\n- Every Critique must use independent `#oms_critic` — never main-agent self-review as GCF pass.\n- Optional completion-gate evidence bullets only; never auto submit-gate or set-stage done.\n\n## Target / scope\n\n$ARGUMENTS",
+  "type": "prompt",
+  "description": "有界 GCF：对已有改动做独立挑刺→修复（最多 3 轮，无未修 P0/P1 算干）。用法: /oms:gcf [范围]",
+  "argsHint": "[范围：路径/模块/空=当前 git 改动]"
+}

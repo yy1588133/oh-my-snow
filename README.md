@@ -26,9 +26,10 @@ OMS wraps Snow CLI with a state machine, stage enforcement, auto-verification, a
 - 📸 **Snapshots** — Save and restore session state for long-running tasks
 - 🎓 **Learning** — Extract reusable patterns from sessions into SKILL.md files
 - 🤖 **18 specialized sub-agents** — Architecture, security, testing, research, and more, each with a structured `role` prompt ported from oh-my-claudecode (Role / Success Criteria / Constraints / Investigation Protocol / Final Checklist)
-- 📚 **10 skills** — Knowledge base wiki, evidence-driven trace, ambiguity-gated interview, two-stage dive, visual-verdict QA, cleanup, research, learn, ralph, plan, and more
-- 🛠️ **19 commands** — 11 workflow commands (auto, plan, qa, goal, verify, release, save, stop, resume, team, help) + 8 skill-mapping commands (interview, dive, trace, cleanup, vverify, wiki, research, learn)
+- 📚 **11 skills** — Knowledge base wiki, evidence-driven trace, ambiguity-gated interview, two-stage dive, visual-verdict QA, cleanup, **bounded GCF**, research, learn, ralph, plan, and more
+- 🛠️ **20 commands** — 11 workflow commands (auto, plan, qa, goal, verify, release, save, stop, resume, team, help) + 9 skill-mapping commands (interview, dive, trace, cleanup, gcf, vverify, wiki, research, learn)
 - 📦 **Hard-stop handoff** — when turn hard cap hits, writes `handoff.json`; `/oms:resume` previews then restores progress + gates (not chat)
+- 🔁 **Bounded GCF** — `/oms:gcf` independent critique→fix loop (max 3 rounds; dry when no open P0/P1; honest hitCeiling)
 
 ## Installation
 
@@ -50,8 +51,8 @@ Equivalent package entry: `oh-my-snow` (same CLI as `oms`).
 
 1. Registers the MCP server in `~/.snow/settings.json`
 2. Merges 18 sub-agents into `~/.snow/sub-agents.json`
-3. Copies 10 skills to `~/.snow/skills/oms/`
-4. Copies 19 commands to `~/.snow/commands/oms/` (11 workflow + 8 skill mappings)
+3. Copies 11 skills to `~/.snow/skills/oms/`
+4. Copies 20 commands to `~/.snow/commands/oms/` (11 workflow + 9 skill mappings)
 5. Installs 4 hook configs to `~/.snow/hooks/` (global, with absolute path commands pointing to the npm package)
 6. Creates `<project>/.snow/oms-state/` for session state (auto-created per project at runtime)
 
@@ -188,6 +189,7 @@ Each maps to a skill via the `skill-execute` tool — equivalent to `/skill oms/
 | `/oms:dive <target>`       | `oms/dive`       | Two-stage pipeline: trace root-cause → 3-point inject into interview for requirements            |
 | `/oms:trace <target>`      | `oms/trace`      | Evidence-driven causal trace — multi-hypothesis + 6-tier evidence + rebuttal rounds              |
 | `/oms:cleanup <target>`    | `oms/cleanup`    | Detect and clean up AI-generated redundant or low-quality code       |
+| `/oms:gcf [scope]`         | `oms/gcf`        | Bounded GCF: independent critique→fix on existing changes (max 3 rounds, P0/P1 dry) |
 | `/oms:vverify <target>`    | `oms/vverify`    | Screenshot-driven visual QA judge — strict JSON verdict + 90-score threshold                     |
 | `/oms:wiki <target>`       | `oms/wiki`       | Persistent markdown knowledge base — ingest/query/lint, cross-session accumulation               |
 | `/oms:research <question>` | `oms/research`   | Autonomous multi-step research combining web search and code analysis |
